@@ -18,7 +18,9 @@ Use lowercase kebab-case filenames and relative Markdown links. Keep this index 
 
 - [2026-11-22 MinidoracatBuilder migration cache validation](reports/2026-11-22-minidoracatbuilder-migration-cache.md) records the Kahlua checks and staged package build.
 
+- [2026-11-22 Basement Building load callback validation](reports/2026-11-22-basementdig-load-callbacks.md) records the Kahlua checks and staged package build.
+
 ## Features
 
-- [Map-load compatibility patches](features/map-load-compatibility-patches.md) documents LiuDing Tiles, True Swimming, MinidoracatBuilder and the BasementDig scaffold.
+- [Map-load compatibility patches](features/map-load-compatibility-patches.md) documents LiuDing Tiles, True Swimming, MinidoracatBuilder and BasementDig.
 - [MinidoracatBuilder migration cache](features/minidoracatbuilder-migration-cache.md) documents the coordinate index, reset action, and deferred refund safeguards.

@@ -1,6 +1,6 @@
 [h1]ApocalipseBR LoadGridSquare Optimizations[/h1]
 
-Three independently enabled Build 42 patches that reduce Lua work as map chunks load.
+Four independently enabled Build 42 patches that reduce Lua work as map chunks load.
 
 [h2]LiuDing Tiles[/h2]
 \common\media\lua\server\Items\LiuDing3DItem.lua Converts the [b]LiuDing_Tiles_3DItem_0[/b] map marker into a real sledgehammer. The converter runs when the marker loads, checks the surface height on that square, and places the item above furniture where applicable.
@@ -22,6 +22,20 @@ Moving work off the load callback creates a window where loaded objects can stil
 The cache resets when either mod's reported version or the patch's migration revision changes. If version metadata is missing, the migration revision still applies. In single-player, or as a server admin in multiplayer, right-click the world and select [b]Reset Builder Migration Cache[/b] to clear all coordinate entries. Loaded chunks observed by the cache are requeued through the same tick budget, and other chunks are checked on their next load. The reset affects only the index. Floor and overlay refund ledgers are kept. Use it after changing the save while this companion patch was disabled.
 
 Mod ID [b]minidoracatbuilderfix[/b]. Requires mod ID [b]MinidoracatBuilderFor42[/b] and game Build [b]42.22.2[/b] or later. The override is based on MinidoracatBuilder [b]42.22.2-1.1.1[/b]. Enable both mods on the server and clients for multiplayer. Check compatibility after updating the original mod because this patch replaces its placement file.
+
+[h2]Basement Building[/h2]
+This companion targets [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3806513504]Basement Building by APAROSA[/url], version [b]1.6.13[/b]. It removes both Basement Building subscriptions to [b]Events.LoadGridsquare[/b]. The original subscriptions entered Lua twice for every loaded nonempty square, including surface squares and multiplayer clients that had no authoritative work to do.
+
+[list]
+[*][b]42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Ladder.lua[/b] repaired missing hidden ladder parts on older builds and converted legacy rope ladders for native climbing. Java now calls Lua only when one of the four wooden ladder sprites loads on the server or in single-player. The callback queues an underground candidate. A tick worker checks up to eight candidates per tick and batches record publication after successful repairs. Candidates waiting for a neighboring chunk can resume when it loads.
+[*][b]42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Mirror.lua[/b] found saved basement record copies in underground square mod data. Those copies recover missing or stale rooms after a crash, including expansions saved in a different chunk. It now checks underground squares during the existing chunk callback and keeps the newest copy per basement for deferred recovery. A copy from an expansion can wait for its anchor chunk to load.
+[*][b]42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Build.lua[/b] already used [b]Events.LoadChunk[/b] to maintain basement level markers. That same callback now collects Mirror copies and wakes work waiting for the loaded chunk. Surface-only chunks skip Mirror's square scan.
+[*][b]42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua[/b] publishes authoritative records and registers rooms on multiplayer clients. The patch uses the original file and protocol. Mirror publishes recovered records through Sync and can requeue legacy ladders after their basement record has been restored.
+[/list]
+
+Ordinary streamed squares skip both Lua subscriptions. The engine still matches ladder sprites in Java, and Mirror still queries underground squares through Lua when a chunk contains them. Room recovery and ladder repair run on later ticks, and ladder repairs share a per-tick cap. These changes reduce Lua dispatch and object lookups on the server main thread during chunk integration.
+
+Mod ID [b]apocalipsebr_basementdig_fix[/b]. Requires mod ID [b]aparosa_BasementDig[/b] and game Build [b]42.20.0[/b] or later. Enable both mods on the server and clients for multiplayer. Compare the three overridden files after updating the original mod.
 
 [h2]How the sprite-specific patches work[/h2]
 The old LiuDing Tiles and True Swimming handlers ran through [b]Events.LoadGridsquare[/b] and scanned objects in Lua on each loaded square. With [b]MapObjects.OnLoadWithSprite[/b], the engine matches the registered sprite name and passes that object directly to Lua. Ordinary squares skip both patched Lua handlers. When LoadGridSquare is used to find an specific object, this change has the potential to reduce millions of LoadGridSquare hook calls during a server runtime and coalesce into a single OnLoadWithSprite hook call. The engine still traverses square objects, and LiuDing still checks the surface when it finds a marker. The savings come from fewer Lua calls and fewer Lua-to-Java object lookups during chunk loading.

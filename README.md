@@ -2,7 +2,7 @@
 
 Build 42 compatibility mods for Project Zomboid dedicated servers. The project started with a single LiuDing Tiles fix after ApocalipseBR telemetry showed a **2.56-second server tick**, with **2.03 seconds** spent integrating map cells. Several mods had registered per-square Lua callbacks, so ordinary streaming repeatedly crossed from Java into Kahlua even for squares that contained no object the fix cared about. [Baseline snapshot](.docs/reports/2026-11-22-dedicated-server-square-load.md)
 
-The bundle keeps the original Workshop mods as dependencies. Each companion has its own mod ID and overrides one Lua file at the same logical path. B42 loads the dependency first, resolves duplicate paths to the later mod, and executes the resolved file once. The upstream mods still provide their other scripts and assets. [Implementation reference](.docs/features/map-load-compatibility-patches.md)
+The bundle keeps the original Workshop mods as dependencies. Each companion has its own mod ID and replaces the targeted Lua files at their original paths. B42 loads the dependency first and runs only the companion's copy at each matching path. The original code in those files never runs, so its event handlers never register. The upstream mods still provide their other scripts and assets. [Implementation reference](.docs/features/map-load-compatibility-patches.md)
 
 ## Mods and changes
 
@@ -11,7 +11,7 @@ The bundle keeps the original Workshop mods as dependencies. Each companion has 
 | `ApocalipseBR_LiuDingTiles_fix` | [LiuDing Tiles](https://steamcommunity.com/sharedfiles/filedetails/?id=3736154771), `LiuDing_Tiles` | [`LiuDing3DItem.lua`](ApocalipseBR_LiuDingTiles_fix/common/media/lua/server/Items/LiuDing3DItem.lua). `OnInitGlobalModData` now registers `MapObjects.OnLoadWithSprite` for the sledgehammer marker. The item is placed at its final height before synchronization, removing the old per-item `OnTick` callback. |
 | `ApocalipseBR_TrueSwimming_fix` | [True Swimming by Harkwood](https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726), `TrueSwimming` | [`TrueSwimmingShared.lua`](ApocalipseBR_TrueSwimming_fix/42/media/lua/shared/TrueSwimmingShared.lua). `OnLoadedTileDefinitions` registers `MapObjects.OnLoadWithSprite` for orphaned pontoons. The separate shallow-water `LoadGridsquare` handler and pontoon cleanup on `OnSave` remain active. |
 | `minidoracatbuilderfix` | [Build Anything by Minidoracat](https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886), `MinidoracatBuilderFor42` | [`Place.lua`](minidoracatbuilderfix/42/media/lua/shared/MinidoracatBuilder/Place.lua). `LoadChunk` queues migration work for a bounded `OnTick` worker. A versioned save index skips known empty chunks and limits other cache hits to candidate squares. Right-click **Reset Builder Migration Cache** in single-player or as a multiplayer admin. Based on upstream `42.22.2-1.1.1` and requires game Build `42.22.2` or later. |
-| `apocalipsebr_basementdig_fix` | [Basement Building](https://steamcommunity.com/sharedfiles/filedetails/?id=3806513504), `aparosa_BasementDig` | Scaffold. There is no gameplay override or event change for this package yet. |
+| `apocalipsebr_basementdig_fix` | [Basement Building](https://steamcommunity.com/sharedfiles/filedetails/?id=3806513504), `aparosa_BasementDig` | Overrides `aparosa_BD_Ladder.lua`, `aparosa_BD_Mirror.lua`, and `aparosa_BD_Build.lua`. Sprite-filtered ladder discovery and the existing `LoadChunk` callback replace two `LoadGridsquare` subscriptions. Based on upstream `1.6.13` and requires game Build `42.20.0` or later. |
 
 ### Why this matters on a multiplayer server
 
@@ -25,6 +25,6 @@ The snapshot is the baseline. A comparable dedicated-server capture is still nee
 
 Open the project root in the [PZ Studio VS Code plugin](https://github.com/escapepz/pzstudio), or run `pzstudio build` from that directory. The build assembles the Workshop package in the configured output directory. [Project configuration](project.json)
 
-Enable each desired companion alongside its original mod. Keep the server and connecting clients on the same mod set, especially for the shared True Swimming and MinidoracatBuilder overrides. With LiuDing, use the original Workshop copy with the companion and remove the duplicate full fork from the active mod sources. After updating an upstream mod, compare its overridden file with the revision the companion was based on. [Upstream compatibility notes](.docs/issues/upstream-override-compatibility.md)
+Subscribe to the original Workshop mods and this bundle, then enable each desired companion alongside its original mod. The replacements apply automatically. Keep the server and connecting clients on the same mod set, including the shared True Swimming, MinidoracatBuilder, and Basement Building overrides. [Upstream compatibility notes](.docs/issues/upstream-override-compatibility.md)
 
 The [documentation index](.docs/AGENTS.md) lists features, issues and reports. [AGENTS.md](AGENTS.md) describes the project structure and how to maintain it.

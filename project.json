@@ -45,8 +45,15 @@
             }
         },
         "apocalipsebr_basementdig_fix": {
-            "name": "ApocalipseBR_BasementDig_fix",
-            "description": ""
+            "name": "ApocalipseBR - Basement Building Fix",
+            "description": "Uses sprite-filtered ladder repairs and chunk-based basement record recovery.",
+            "require": "\\aparosa_BasementDig",
+            "versionMin": "42.20.0",
+            "poster": "poster.png",
+            "icon": "icon.png",
+            "build": {
+                "modInfo": "auto-if-missing"
+            }
         }
     },
     "excludes": []
