@@ -11,7 +11,7 @@ Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3736154771]
 
 [b]True Swimming[/b]
 [b]Before[/b] The mod searched newly loaded squares for leftover invisible platforms it uses to let you swim. These can be left behind after an interrupted session or arrive with a newly loaded area in multiplayer.
-[b]Now[/b] The mod removes a leftover platform when it loads. Swimming and walking in shallow water work as before. The patch also keeps True Swimming 1.11’s fix for sinking while walking on docks with True Water.
+[b]Now[/b] The mod removes a leftover platform when it loads. Swimming and walking in shallow water work as before.
 Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726]True Swimming by Harkwood[/url] ([b]TrueSwimming[/b]) and Build 42.20 or later. Enable [b]ApocalipseBR_TrueSwimming_fix[/b].
 
 [b]Minidoracat Build Anything[/b]
