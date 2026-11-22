@@ -1,8 +1,11 @@
 {
   "scripts": {
     "clean": "pzstudio clean",
-    "build": "pzstudio clean && pzstudio build",
-    "watch": "pzstudio clean && pzstudio build && pzstudio watch",
+    "build": "node scripts/build_workshop.cjs",
+    "watch": "npm run build && pzstudio watch",
     "update": "pzstudio update"
+  },
+  "devDependencies": {
+    "pzstudio": "2.2.0"
   }
 }

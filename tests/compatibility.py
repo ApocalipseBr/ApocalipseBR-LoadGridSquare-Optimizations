@@ -5,10 +5,16 @@ import json
 import operator
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINES = json.loads((ROOT / "tests/workshop-baselines.json").read_text(encoding="utf-8"))
+
+if __package__ in ("", None):
+    sys.path.insert(0, str(ROOT))
+from scripts.true_swimming import COMPANION, LUA_PATH, patch_source
+
 
 
 def build_number(version):
@@ -71,9 +77,51 @@ def digest(path):
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
-def check(workshop_root, *, reviewed):
+def generate_true_swimming(workshop_root, *, reviewed):
+    from lupa.lua51 import LuaError
+    from tests.lua_runner import run_lua_spec
+
+    spec = BASELINES["mods"][COMPANION]
+    item_id = spec["reviewed_workshop_id"] if reviewed else spec["workshop_id"]
+    upstream = find_mod(workshop_root / item_id, spec["mod_id"])
+    version = mod_info(version_layer(upstream)).get("modversion", "unlisted version")
+    original = lua_files(upstream).get(LUA_PATH.lower())
+    if original is None:
+        raise ValueError(f"True Swimming {item_id} ({version}): missing {LUA_PATH}")
+
+    source = original.read_bytes()
+    observed = hashlib.sha256(source.replace(b"\r\n", b"\n")).hexdigest()
+    baseline = spec["overrides"][LUA_PATH]
+    if observed != baseline:
+        print(f"INFO True Swimming {item_id} ({version}): upstream file changed from reviewed SHA-256 {baseline} to {observed}")
+
+    generated = patch_source(source)
+
+    def read_patch(companion, path):
+        if (companion, path) != (COMPANION, LUA_PATH):
+            raise ValueError(f"Unexpected Lua fixture request: {companion}/{path}")
+        return generated
+
+    try:
+        run_lua_spec("true_swimming_spec.lua", read_patch, restrict=True)
+        if not reviewed:
+            run_lua_spec("true_swimming_dock.lua", read_patch, restrict=True)
+    except (LuaError, MemoryError) as error:
+        raise ValueError(f"True Swimming {item_id} ({version}): generated Lua failed regression tests: {error}") from error
+    print(f"PASS True Swimming {item_id} ({version}): replaced one hook and tested generated Lua ({observed})")
+    return generated
+
+
+def check(workshop_root, *, reviewed, companions=None):
     errors = []
-    for companion, spec in BASELINES["mods"].items():
+    for companion in companions if companions is not None else BASELINES["mods"]:
+        spec = BASELINES["mods"][companion]
+        if companion == COMPANION:
+            try:
+                generate_true_swimming(workshop_root, reviewed=reviewed)
+            except (OSError, ValueError) as error:
+                errors.append(str(error))
+            continue
         item_id = spec["reviewed_workshop_id"] if reviewed else spec["workshop_id"]
         try:
             upstream = find_mod(workshop_root / item_id, spec["mod_id"])
@@ -107,9 +155,10 @@ def check(workshop_root, *, reviewed):
     return errors
 
 
-def download(steamcmd):
+def download(steamcmd, *, ids=None):
     steamcmd = steamcmd.resolve()
-    ids = [spec["workshop_id"] for spec in BASELINES["mods"].values()]
+    if ids is None:
+        ids = [spec["workshop_id"] for spec in BASELINES["mods"].values()]
     command = [str(steamcmd), "+login", "anonymous"]
     for item_id in ids:
         command.extend(["+workshop_download_item", "108600", item_id, "validate"])

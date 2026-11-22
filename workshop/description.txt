@@ -1,43 +1,43 @@
 [h1]ApocalipseBR LoadGridSquare Optimizations[/h1]
 
-Four independently enabled Build 42 patches that reduce Lua work as map chunks load.
+Four independently enabled Build 42 companions that reduce Lua work as map chunks load.
 
-[h2]LiuDing Tiles[/h2]
-\common\media\lua\server\Items\LiuDing3DItem.lua Converts the [b]LiuDing_Tiles_3DItem_0[/b] map marker into a real sledgehammer. The converter runs when the marker loads, checks the surface height on that square, and places the item above furniture where applicable.
-
-Mod ID [b]ApocalipseBR_LiuDingTiles_fix[/b]. Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3736154771]LiuDing Tiles[/url] (mod ID [b]LiuDing_Tiles[/b]).
-
-[h2]True Swimming[/h2]
-\42\media\lua\shared\TrueSwimmingShared.lua Removes orphaned invisible pontoons that can be left behind by an interrupted session or arrive in a streamed multiplayer chunk. Cleanup runs when the [b]TrueSwimming_ponton[/b] sprite loads. True Water's shallow-water setup still uses its square-load handler because it checks water properties and neighboring squares.
-
-Mod ID [b]ApocalipseBR_TrueSwimming_fix[/b]. Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726]True Swimming by Harkwood[/url] (mod ID [b]TrueSwimming[/b]). The patch is based on True Swimming 1.9.
-
-[h2]MinidoracatBuilder[/h2]
-This companion patch for [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886]Minidoracat Build Anything for B42[/url] by Minidoracat replaces the builder's placement module. The original hook entered Lua for each nonempty square as chunks loaded. The replacement receives one [b]LoadChunk[/b] callback per chunk and queues discovery when needed. A cursor spreads square and special-object visits across ticks and can resume within a dense square. All chunks share a cap of 256 scan steps per tick. Deferred repair jobs share a cap of eight per tick. Both queues share a 2 ms time target checked between steps.
-
-The server or single-player save remembers completed scans by chunk coordinate in GlobalModData. An index entry must match a marker saved with the chunk itself. This guards against using a cache from a different chunk save. A verified chunk with no candidates skips the cursor entirely. A verified chunk with candidates visits only their recorded squares to apply current sandbox settings and, in single-player, register light switches. Placement, removal, and moved door leaves invalidate affected chunks. Failed or blocked repairs remain eligible, so an overlay waiting for its host can be tried on a later load. Multiplayer clients keep the bounded discovery scan because a streamed chunk can change while a client is away.
-
-Moving work off the load callback creates a window where loaded objects can still have their saved zombie protection, container capacity, corner or floor flags, or lighting state. When the cursor changes pathing flags it refreshes the affected square. The builder checks for an unmigrated floor refund before calculating dismantle materials, so that interaction can complete the transfer ahead of the cursor. Eligible floors retain their legacy materials until the refund entry is confirmed. The overlay repair likewise verifies the attachment and its refund record before removing the old object.
-
-The cache resets when either mod's reported version or the patch's migration revision changes. If version metadata is missing, the migration revision still applies. In single-player, or as a server admin in multiplayer, right-click the world and select [b]Reset Builder Migration Cache[/b] to clear all coordinate entries. Loaded chunks observed by the cache are requeued through the same tick budget, and other chunks are checked on their next load. The reset affects only the index. Floor and overlay refund ledgers are kept. Use it after changing the save while this companion patch was disabled.
-
-Mod ID [b]minidoracatbuilderfix[/b]. Requires mod ID [b]MinidoracatBuilderFor42[/b] and game Build [b]42.22.2[/b] or later. The override is based on MinidoracatBuilder [b]42.22.2-1.1.1[/b]. Enable both mods on the server and clients for multiplayer. Check compatibility after updating the original mod because this patch replaces its placement file.
-
-[h2]Basement Building[/h2]
-This companion targets [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3806513504]Basement Building by APAROSA[/url], version [b]1.6.13[/b]. It removes both Basement Building subscriptions to [b]Events.LoadGridsquare[/b]. The original subscriptions entered Lua twice for every loaded nonempty square, including surface squares and multiplayer clients that had no authoritative work to do.
-
+[h2]Requirements and setup[/h2]
 [list]
-[*][b]42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Ladder.lua[/b] repaired missing hidden ladder parts on older builds and converted legacy rope ladders for native climbing. Java now calls Lua only when one of the four wooden ladder sprites loads on the server or in single-player. The callback queues an underground candidate. A tick worker checks up to eight candidates per tick and batches record publication after successful repairs. Candidates waiting for a neighboring chunk can resume when it loads.
-[*][b]42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Mirror.lua[/b] found saved basement record copies in underground square mod data. Those copies recover missing or stale rooms after a crash, including expansions saved in a different chunk. It now checks underground squares during the existing chunk callback and keeps the newest copy per basement for deferred recovery. A copy from an expansion can wait for its anchor chunk to load.
-[*][b]42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Build.lua[/b] already used [b]Events.LoadChunk[/b] to maintain basement level markers. That same callback now collects Mirror copies and wakes work waiting for the loaded chunk. Surface-only chunks skip Mirror's square scan.
-[*][b]42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua[/b] publishes authoritative records and registers rooms on multiplayer clients. The patch uses the original file and protocol. Mirror publishes recovered records through Sync and can requeue legacy ladders after their basement record has been restored.
+[*]Subscribe to this bundle and the original Workshop item for each fix you want. Enable the original mod and its companion together. The companion declares the original as a dependency and loads its replacement Lua at the same path.
+[*]On a dedicated server, add this bundle and the selected originals to WorkshopItems and enable the matching original and companion mod IDs in Mods. Use the same enabled mod set on the server and connecting clients.
+[*]Use a Build 42 version supported by the original mod and its companion. The full bundle targets Build 42.22.2 or later. Check the requirements below if enabling only some fixes.
 [/list]
 
-Ordinary streamed squares skip both Lua subscriptions. The engine still matches ladder sprites in Java, and Mirror still queries underground squares through Lua when a chunk contains them. Room recovery and ladder repair run on later ticks, and ladder repairs share a per-tick cap. These changes reduce Lua dispatch and object lookups on the server main thread during chunk integration.
+[h2]LiuDing Tiles[/h2]
+Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3736154771]LiuDing Tiles[/url] (mod ID [b]LiuDing_Tiles[/b]). Enable companion [b]ApocalipseBR_LiuDingTiles_fix[/b]. The server replaces the [b]LiuDing_Tiles_3DItem_0[/b] marker with one pickable sledgehammer. It checks the surface on the marker square and places the item at its final height before syncing it.
 
-Mod ID [b]apocalipsebr_basementdig_fix[/b]. Requires mod ID [b]aparosa_BasementDig[/b] and game Build [b]42.20.0[/b] or later. Enable both mods on the server and clients for multiplayer. Compare the three overridden files after updating the original mod.
+[h2]True Swimming[/h2]
+Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726]True Swimming by Harkwood[/url] (mod ID [b]TrueSwimming[/b]). The upstream listing specifies Build 42.20 or later. Enable companion [b]ApocalipseBR_TrueSwimming_fix[/b]. The sprite callback removes orphaned [b]TrueSwimming_ponton[/b] objects. The shallow-water square callback and save cleanup remain active. The build was verified against True Swimming 1.11 and retains its dock fix when using True Water.
 
-[h2]How the sprite-specific patches work[/h2]
-The old LiuDing Tiles and True Swimming handlers ran through [b]Events.LoadGridsquare[/b] and scanned objects in Lua on each loaded square. With [b]MapObjects.OnLoadWithSprite[/b], the engine matches the registered sprite name and passes that object directly to Lua. Ordinary squares skip both patched Lua handlers. When LoadGridSquare is used to find an specific object, this change has the potential to reduce millions of LoadGridSquare hook calls during a server runtime and coalesce into a single OnLoadWithSprite hook call. The engine still traverses square objects, and LiuDing still checks the surface when it finds a marker. The savings come from fewer Lua calls and fewer Lua-to-Java object lookups during chunk loading.
+[h2]MinidoracatBuilder[/h2]
+Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886]Minidoracat Build Anything for B42[/url] (mod ID [b]MinidoracatBuilderFor42[/b]), its declared dependencies, and Build [b]42.22.2[/b] or later. Enable companion [b]minidoracatbuilderfix[/b]. The override is based on [b]42.22.2-1.1.1[/b].
 
-MinidoracatBuilder uses Events.LoadChunk to reduce Java-to-Lua callbacks and a tick budget to spread the square and object scan across frames.
+One [b]LoadChunk[/b] callback queues migration. Across all chunks, the tick worker allows up to 256 scan steps and eight deferred repair jobs, with a shared 2 ms time target checked between steps. The server or single-player save uses a verified chunk index to skip empty chunks or revisit known candidate squares. Multiplayer clients keep bounded discovery. Migration can finish after the chunk loads.
+
+In single-player or as a server admin, right-click the world and select [b]Reset Builder Migration Cache[/b] to clear the index and requeue observed chunks. Floor and overlay refund records are kept.
+
+[h2]Basement Building[/h2]
+Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3806513504]Basement Building by APAROSA[/url] (mod ID [b]aparosa_BasementDig[/b]) and Build [b]42.20.0[/b] or later. Enable companion [b]apocalipsebr_basementdig_fix[/b]. The override is based on [b]1.6.13[/b].
+
+Ladder discovery registers one callback for four sprites and defers up to eight ladder repairs per tick in authoritative worlds. The existing chunk callback collects underground room records and wakes repairs waiting for a neighboring chunk. Surface-only chunks skip the record scan. The original synchronization module publishes recovered rooms to clients.
+
+[h2]Patch architecture[/h2]
+LiuDing Tiles, MinidoracatBuilder, and Basement Building ship checked-in replacements for their targeted Lua files. Compare those files with upstream when updating the original mods.
+
+For True Swimming, the build downloads the original Workshop source and replaces exactly one orphan-pontoon callback. All other bytes in the file are preserved. Regression tests run on the generated Lua before the full file is packaged. The build stops for review if the callback changes or the tests fail. The published companion contains the generated file and still requires the original mod.
+
+[h2]For mod authors[/h2]
+[list]
+[*]If your square-load callback only looks for an object with a known sprite, register [b]MapObjects.OnLoadWithSprite[/b] and work on the object it passes to Lua. Remove the original registration for that task and keep callbacks that need square or neighbor data.
+[*]For True Swimming, replace the anonymous orphan-pontoon [b]Events.LoadGridsquare[/b] registration in the shared file with the linked replacement. Keep sprite setup, shallow-water handling, and save cleanup. Test streamed chunks and dock walking with True Water on the server and a connecting client. Once the upstream release includes the same cleanup, users on that release can disable the True Swimming companion.
+[*]For Builder and Basement Building, use the linked source reference to inspect the chunk and tick callbacks. Test saved worlds and delayed repairs, including cases where a neighboring chunk arrives later.
+[*]To rebuild this bundle, use Node.js, npm, Python 3.12, and SteamCMD. Follow the README build commands, then use the generated Workshop folder. The daily GitHub workflow also produces a tested package artifact.
+[/list]
+
+[url=https://github.com/rbm4/ApocalipseBR_LiuDingTiles_fix#build-and-regenerate]Build instructions[/url] | [url=https://github.com/rbm4/ApocalipseBR_LiuDingTiles_fix/blob/master/patches/true-swimming/orphan-pontoon.after.lua]True Swimming replacement[/url] | [url=https://github.com/rbm4/ApocalipseBR_LiuDingTiles_fix/blob/master/.docs/features/map-load-compatibility-patches.md]Source and event reference[/url]

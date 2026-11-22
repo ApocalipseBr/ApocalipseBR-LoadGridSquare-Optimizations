@@ -1,11 +1,12 @@
 import json
 import unittest
+from pathlib import Path
 
 from lupa.lua51 import LuaRuntime
 
-from compatibility import BASELINES, ROOT, lua_files, mod_info, version_layer
-
-TESTS = ROOT / "tests"
+from scripts.true_swimming import COMPANION, OUTPUT_PATH, PATCH_DIR, patch_source
+from tests.compatibility import BASELINES, ROOT, lua_files, mod_info, version_layer
+from tests.lua_runner import LUA_TESTS, run_lua_spec
 
 
 class PatchTests(unittest.TestCase):
@@ -24,6 +25,10 @@ class PatchTests(unittest.TestCase):
                 files = lua_files(mod)
                 lua = LuaRuntime()
                 for name in spec["overrides"]:
+                    if companion == COMPANION:
+                        self.assertNotIn(name.lower(), files)
+                        self.assertEqual(OUTPUT_PATH, Path(companion, layer.name, name))
+                        continue
                     self.assertIn(name.lower(), files)
                     file = files[name.lower()]
                     actual_path = file.relative_to(mod).as_posix().split("/", 1)[1]
@@ -32,17 +37,31 @@ class PatchTests(unittest.TestCase):
                     lua.compile(file.read_bytes(), name=file.as_posix())
 
     def test_lua_behaviors(self):
-        for spec in sorted((TESTS / "lua").glob("*_spec.lua")):
-            with self.subTest(spec=spec.name):
-                lua = LuaRuntime(encoding=None, register_eval=False, register_builtins=False)
+        def read_patch(companion, path):
+            return lua_files(ROOT / companion)[path.lower()].read_bytes()
 
-                def load_patch(companion, path):
-                    file = lua_files(ROOT / companion.decode())[path.decode().lower()]
-                    return lua.execute(file.read_bytes(), name=file.as_posix().encode())
+        for spec in sorted(LUA_TESTS.glob("*_spec.lua")):
+            if spec.name != "true_swimming_spec.lua":
+                with self.subTest(spec=spec.name):
+                    run_lua_spec(spec.name, read_patch)
 
-                lua.globals()[b"load_patch"] = load_patch
-                lua.execute((TESTS / "lua/harness.lua").read_bytes())
-                lua.execute(spec.read_bytes(), name=spec.name.encode())
+    def test_generated_override_preserves_unrelated_bytes(self):
+        before = (PATCH_DIR / "orphan-pontoon.before.lua").read_bytes().replace(b"\r\n", b"\n")
+        after = (PATCH_DIR / "orphan-pontoon.after.lua").read_bytes().replace(b"\r\n", b"\n")
+        prefix = b"-- upstream prefix\r\n"
+        suffix = b"-- upstream suffix\n"
+        for newline in (b"\n", b"\r\n"):
+            with self.subTest(newline=newline):
+                source = prefix + before.replace(b"\n", newline) + suffix
+                self.assertEqual(patch_source(source), prefix + after.replace(b"\n", newline) + suffix)
+
+    def test_generation_requires_one_complete_hook(self):
+        before = (PATCH_DIR / "orphan-pontoon.before.lua").read_bytes()
+        for source in (b"-- missing hook", before.replace(b"sq:getObjects()", b"sq:getSpecialObjects()"),
+                       b"-- " + before, before + before):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(ValueError, "expected exactly one"):
+                    patch_source(source)
 
 
 if __name__ == "__main__":

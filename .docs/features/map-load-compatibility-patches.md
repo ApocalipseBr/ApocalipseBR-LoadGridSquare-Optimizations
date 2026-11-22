@@ -27,8 +27,8 @@ The mod dependency in `42/mod.info` orders each original before its companion. B
 
 ## True Swimming
 
-- **Original** [True Swimming by Harkwood, Workshop 3802372726](https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726), mod ID `TrueSwimming`. The bundle description records version 1.9. The diagnostic and local comparison used a copy under Workshop ID `3691681426`.
-- **Override** [`media/lua/shared/TrueSwimmingShared.lua`](../../ApocalipseBR_TrueSwimming_fix/42/media/lua/shared/TrueSwimmingShared.lua), distributed under `42/`.
+- **Original** [True Swimming by Harkwood, Workshop 3802372726](https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726), mod ID `TrueSwimming`. The build uses the public Workshop listing. The diagnostic used the local 1.9 copy under Workshop ID `3691681426`.
+- **Override** The build generates `42/media/lua/shared/TrueSwimmingShared.lua` from the selected upstream file using the [orphan-pontoon patch](../../patches/true-swimming/orphan-pontoon.after.lua).
 - **Behavior** Replaces the Lua object scan on every square with a handler at priority 0 for `TrueSwimming_ponton`. It still checks the object's name before removing it with `RemoveTileObject`. The shared override runs wherever the original swimming module loads, including multiplayer clients handling streamed chunks.
 - **Shallow water** The separate `LoadGridsquare` handler remains because depth classification and water walkability depend on square properties and neighboring squares. Active pontoon save cleanup is preserved.
 
@@ -51,6 +51,6 @@ The mod dependency in `42/mod.info` orders each original before its companion. B
 
 ## Verification
 
-The initial LiuDing implementation passed a local PZ Studio build and a mocked Fengari check of sprite registration, client authority, item height, repeated conversion and removal failure. This documentation also compares the current True Swimming and Builder overrides with locally installed upstream files. Full-bundle gameplay, client synchronization and timing still need a representative dedicated-server run.
+The initial LiuDing implementation passed a local PZ Studio build and a mocked Fengari check of sprite registration, client authority, item height, repeated conversion and removal failure. The generated True Swimming override passed mocked Lua checks against Workshop 1.11, including pontoon cleanup and the dock behavior. The local 1.9 input passed the orphan-pontoon checks. The Builder override was compared with the installed upstream file. Full-bundle gameplay, client synchronization and timing still need a representative dedicated-server run.
 
 The Basement Building overrides passed mocked Kahlua checks and a staged PZ Studio build. The [Basement Building validation report](../reports/2026-11-22-basementdig-load-callbacks.md) lists the scenarios and remaining runtime checks.

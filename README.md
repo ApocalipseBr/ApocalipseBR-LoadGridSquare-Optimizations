@@ -9,7 +9,7 @@ The bundle keeps the original Workshop mods as dependencies. Each companion has 
 | Companion mod ID | Original mod | Overridden file and event change |
 | --- | --- | --- |
 | `ApocalipseBR_LiuDingTiles_fix` | [LiuDing Tiles](https://steamcommunity.com/sharedfiles/filedetails/?id=3736154771), `LiuDing_Tiles` | [`LiuDing3DItem.lua`](ApocalipseBR_LiuDingTiles_fix/common/media/lua/server/Items/LiuDing3DItem.lua). `OnInitGlobalModData` now registers `MapObjects.OnLoadWithSprite` for the sledgehammer marker. The item is placed at its final height before synchronization, removing the old per-item `OnTick` callback. |
-| `ApocalipseBR_TrueSwimming_fix` | [True Swimming by Harkwood](https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726), `TrueSwimming` | [`TrueSwimmingShared.lua`](ApocalipseBR_TrueSwimming_fix/42/media/lua/shared/TrueSwimmingShared.lua). `OnLoadedTileDefinitions` registers `MapObjects.OnLoadWithSprite` for orphaned pontoons. The separate shallow-water `LoadGridsquare` handler and pontoon cleanup on `OnSave` remain active. |
+| `ApocalipseBR_TrueSwimming_fix` | [True Swimming by Harkwood](https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726), `TrueSwimming` | Generates `TrueSwimmingShared.lua` from Workshop source using the [orphan-pontoon patch](patches/true-swimming/orphan-pontoon.after.lua). `OnLoadedTileDefinitions` registers `MapObjects.OnLoadWithSprite` for orphaned pontoons. The separate shallow-water `LoadGridsquare` handler and pontoon cleanup on `OnSave` remain active. |
 | `minidoracatbuilderfix` | [Build Anything by Minidoracat](https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886), `MinidoracatBuilderFor42` | [`Place.lua`](minidoracatbuilderfix/42/media/lua/shared/MinidoracatBuilder/Place.lua). `LoadChunk` queues migration work for a bounded `OnTick` worker. A versioned save index skips known empty chunks and limits other cache hits to candidate squares. Right-click **Reset Builder Migration Cache** in single-player or as a multiplayer admin. Based on upstream `42.22.2-1.1.1` and requires game Build `42.22.2` or later. |
 | `apocalipsebr_basementdig_fix` | [Basement Building](https://steamcommunity.com/sharedfiles/filedetails/?id=3806513504), `aparosa_BasementDig` | Overrides `aparosa_BD_Ladder.lua`, `aparosa_BD_Mirror.lua`, and `aparosa_BD_Build.lua`. Sprite-filtered ladder discovery and the existing `LoadChunk` callback replace two `LoadGridsquare` subscriptions. Based on upstream `1.6.13` and requires game Build `42.20.0` or later. |
 
@@ -21,14 +21,42 @@ Builder migrations depend on saved object state and multiple object types. They 
 
 The snapshot is the baseline. A comparable dedicated-server capture is still needed to quantify the impact of the combined bundle. [Baseline and measurement limits](.docs/reports/2026-11-22-dedicated-server-square-load.md)
 
-## Build and enable
+## Requirements and installation
 
-Open the project root in the [PZ Studio VS Code plugin](https://github.com/escapepz/pzstudio), or run `pzstudio build` from that directory. The build assembles the Workshop package in the configured output directory. [Project configuration](project.json)
+Install Project Zomboid Build 42 and the original Workshop item for each companion you plan to enable. The full bundle targets Build `42.22.2` or later. For individual companions, LiuDing Tiles follows the original mod's Build 42 requirements, True Swimming lists `42.20+`, and Basement Building requires `42.20.0` or later. Install any dependencies declared by the originals. [Original mods and IDs](#mods-and-changes)
 
-Subscribe to the original Workshop mods and this bundle, then enable each desired companion alongside its original mod. The replacements apply automatically. Keep the server and connecting clients on the same mod set, including the shared True Swimming, MinidoracatBuilder, and Basement Building overrides. [Upstream compatibility notes](.docs/issues/upstream-override-compatibility.md)
+1. Subscribe to this bundle and the originals you use.
+2. Enable each original alongside its companion. On a dedicated server, add the Workshop item IDs to `WorkshopItems` and the corresponding mod IDs to `Mods`. The companion dependency puts the original first.
+3. Keep the enabled mod set consistent between the server and connecting clients, especially for shared Lua patches.
+
+## Patch architecture
+
+True Swimming's companion stores the original callback and its replacement as small Lua snippets. The build downloads the public Workshop item, resolves the Lua file for the target game build, then replaces exactly one matching callback. It preserves the upstream source outside that callback, including True Swimming 1.11's dock fix. The build runs the orphan-pontoon and dock regression tests on the generated Lua and uses PZ Studio to package those same bytes at `42/media/lua/shared/TrueSwimmingShared.lua`. A changed or missing callback, duplicate match, or failed test stops the build before it replaces the previous package. [True Swimming patch](patches/true-swimming/) · [Test and build design](.docs/features/patch-tests.md)
+
+LiuDing Tiles, MinidoracatBuilder, and Basement Building ship checked-in Lua replacements. The Workshop check compares their upstream targets with reviewed hashes. A mismatch prompts a source review before updating the baseline. [Upstream compatibility notes](.docs/issues/upstream-override-compatibility.md)
+
+## Build and regenerate
+
+Use Node.js with npm, Python 3.12, and a standalone SteamCMD installation. Run the following from the repository root. Replace the example SteamCMD path with your own.
+
+```powershell
+npm ci --ignore-scripts
+py -3 -m pip install -r tests/requirements.txt
+npm run build -- --steamcmd C:/tools/steamcmd/steamcmd.exe
+```
+
+The command downloads True Swimming anonymously, regenerates the override, runs its tests, and packages all four companions in the configured PZ Studio output directory. Use `--output <directory>` for a separate destination, `--check-upstream` to check all four items before packaging, or `--workshop-root <path>` to build from an existing Workshop cache. [Build and test options](.docs/features/patch-tests.md)
+
+Run the build again after an upstream update. GitHub Actions also checks the latest Workshop downloads daily and on demand, and attaches a tested package on success. Use that package for a staging server or a Workshop upload. [Workshop workflow](.github/workflows/workshop-compatibility.yml)
+
+## For upstream mod authors
+
+- **True Swimming.** In the shared Lua file, replace the anonymous orphan-pontoon `Events.LoadGridsquare.Add(...)` callback with the linked snippet. It registers the `TrueSwimming_ponton` sprite from `OnLoadedTileDefinitions`. Keep the existing sprite setup, the separate shallow-water callback, and the `OnSave` cleanup. Check chunk streaming and dock walking with True Water on a dedicated server and a connecting client. Once a release includes equivalent cleanup, users of that release can disable this companion. [Replacement snippet](patches/true-swimming/orphan-pontoon.after.lua) · [Regression scenarios](.docs/features/patch-tests.md)
+- **LiuDing Tiles.** Use the registered marker sprite to trigger the conversion. Calculate the height on that square, remove the marker, and publish the item at its final position. [LiuDing converter](ApocalipseBR_LiuDingTiles_fix/common/media/lua/server/Items/LiuDing3DItem.lua)
+- **MinidoracatBuilder and Basement Building.** Use `LoadChunk` for work that depends on several squares. Put deferred scanning and repairs behind a tick budget, and test old saves and dependencies that load with a neighboring chunk. Basement Building also uses a sprite callback for ladder discovery. [Implementation reference](.docs/features/map-load-compatibility-patches.md)
 
 ## Tests
 
-Run the Lua regression suite locally with `python -B -m unittest discover -s tests -v` after installing `tests/requirements.txt`. GitHub Actions runs the suite on pushes and pull requests. A separate daily job downloads the latest upstream Workshop items and flags changes to replaced files. [Local setup and test pattern](.docs/features/patch-tests.md)
+Run the Lua regression suite locally with `python -B -m unittest discover -s tests -v` after installing `tests/requirements.txt`. GitHub Actions runs the suite on pushes and pull requests. A separate daily job downloads the latest Workshop items, tests and packages the generated True Swimming override, and checks the other overrides for upstream changes. [Local setup and test pattern](.docs/features/patch-tests.md)
 
 The [documentation index](.docs/AGENTS.md) lists features, issues and reports. [AGENTS.md](AGENTS.md) describes the project structure and how to maintain it.
