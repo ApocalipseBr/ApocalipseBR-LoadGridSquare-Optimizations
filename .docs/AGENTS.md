@@ -24,3 +24,4 @@ Use lowercase kebab-case filenames and relative Markdown links. Keep this index 
 
 - [Map-load compatibility patches](features/map-load-compatibility-patches.md) documents LiuDing Tiles, True Swimming, MinidoracatBuilder and BasementDig.
 - [MinidoracatBuilder migration cache](features/minidoracatbuilder-migration-cache.md) documents the coordinate index, reset action, and deferred refund safeguards.
+- [Patch tests and Workshop compatibility](features/patch-tests.md) documents the Lua fixtures, upstream baselines and GitHub Actions workflows.

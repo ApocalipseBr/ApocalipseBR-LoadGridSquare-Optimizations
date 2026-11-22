@@ -1,0 +1,43 @@
+{
+  "game_build": "42.22.2",
+  "mods": {
+    "ApocalipseBR_LiuDingTiles_fix": {
+      "mod_id": "LiuDing_Tiles",
+      "workshop_id": "3736154771",
+      "reviewed_workshop_id": "3736154771",
+      "reviewed_modversion": null,
+      "overrides": {
+        "media/lua/server/Items/LiuDing3DItem.lua": "9d80c22b9a21abfc4e704e92655802ca6b560727614195358b272146c3b9747d"
+      }
+    },
+    "ApocalipseBR_TrueSwimming_fix": {
+      "mod_id": "TrueSwimming",
+      "workshop_id": "3802372726",
+      "reviewed_workshop_id": "3691681426",
+      "reviewed_modversion": "1.9",
+      "overrides": {
+        "media/lua/shared/TrueSwimmingShared.lua": "deb3f26592e660dc926824c6b33911dc6ab0a47a88702ebdf94ec7173dfe999b"
+      }
+    },
+    "minidoracatbuilderfix": {
+      "mod_id": "MinidoracatBuilderFor42",
+      "workshop_id": "3830045886",
+      "reviewed_workshop_id": "3830045886",
+      "reviewed_modversion": "42.22.2-1.1.1",
+      "overrides": {
+        "media/lua/shared/MinidoracatBuilder/Place.lua": "440daf3eaac3d7aa9ce8ccf57750d5f5a8f868ec5c9ee7c0e5eb56226f9f2e90"
+      }
+    },
+    "apocalipsebr_basementdig_fix": {
+      "mod_id": "aparosa_BasementDig",
+      "workshop_id": "3806513504",
+      "reviewed_workshop_id": "3806513504",
+      "reviewed_modversion": "1.6.13",
+      "overrides": {
+        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Build.lua": "3244a5017e832903aaaa6fa64a7d807455ef607a6cc6a983bbed5216a62cbb03",
+        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Ladder.lua": "18f18230163d096055c5f53ca05cadc4afd9fc2e67aa6add053f7457a58372bd",
+        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Mirror.lua": "f13df937cb0f616e05fe35cfbc41759292ddca67d99ac88cc2434eb934419f1a"
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+name: Workshop compatibility
+
+on:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-workshop:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Download SteamCMD and check current Workshop files
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'steamcmd.zip'
+          $dir = Join-Path $env:RUNNER_TEMP 'pz-steamcmd'
+          Invoke-WebRequest 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip' -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir
+          python -B tests/compatibility.py --steamcmd (Join-Path $dir 'steamcmd.exe')

@@ -27,4 +27,8 @@ Open the project root in the [PZ Studio VS Code plugin](https://github.com/escap
 
 Subscribe to the original Workshop mods and this bundle, then enable each desired companion alongside its original mod. The replacements apply automatically. Keep the server and connecting clients on the same mod set, including the shared True Swimming, MinidoracatBuilder, and Basement Building overrides. [Upstream compatibility notes](.docs/issues/upstream-override-compatibility.md)
 
+## Tests
+
+Run the Lua regression suite locally with `python -B -m unittest discover -s tests -v` after installing `tests/requirements.txt`. GitHub Actions runs the suite on pushes and pull requests. A separate daily job downloads the latest upstream Workshop items and flags changes to replaced files. [Local setup and test pattern](.docs/features/patch-tests.md)
+
 The [documentation index](.docs/AGENTS.md) lists features, issues and reports. [AGENTS.md](AGENTS.md) describes the project structure and how to maintain it.
