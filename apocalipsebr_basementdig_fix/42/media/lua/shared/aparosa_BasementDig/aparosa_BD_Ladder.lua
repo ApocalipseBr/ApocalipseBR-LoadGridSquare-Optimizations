@@ -1296,6 +1296,7 @@ Events.OnInitGlobalModData.Add(function()
         table.insert(sprites, sprite)
     end
     MapObjects.OnLoadWithSprite(sprites, onLadderSpriteLoaded, 17)
+    ApocalipseBR_BasementLadderHookReady = true
 end)
 
 -- 向きの組にするか。置く時だけ（持ち上げる時に向きの組にすると、原版の持ち上げの動作が始まってすぐ止まり、梯子が外れなかった。

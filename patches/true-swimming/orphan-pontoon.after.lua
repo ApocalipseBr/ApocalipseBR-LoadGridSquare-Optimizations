@@ -7,4 +7,5 @@ end
 
 Events.OnLoadedTileDefinitions.Add(function()
     MapObjects.OnLoadWithSprite(MARK, removeOrphanPontoon, 0)
+    ApocalipseBR_TrueSwimmingSpriteHookReady = true
 end)

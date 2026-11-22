@@ -6,6 +6,7 @@ Four independently enabled Build 42 companions that reduce Lua work as map chunk
 [list]
 [*]Subscribe to this bundle and the original Workshop item for each fix you want. Enable the original mod and its companion together. The companion declares the original as a dependency and loads its replacement Lua at the same path.
 [*]On a dedicated server, add this bundle and the selected originals to WorkshopItems and enable the matching original and companion mod IDs in Mods. Use the same enabled mod set on the server and connecting clients.
+[*]Check the dedicated server log for [b]startup OK[/b] from each enabled companion. These messages report hook registration and initialization with debug mode off.
 [*]Use a Build 42 version supported by the original mod and its companion. The full bundle targets Build 42.22.2 or later. Check the requirements below if enabling only some fixes.
 [/list]
 

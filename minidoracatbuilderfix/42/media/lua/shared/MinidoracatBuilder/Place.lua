@@ -2355,5 +2355,6 @@ Events.OnObjectAdded.Add(function(obj)
     MinidoracatBuilder.Place.onAdded(obj)
 end)
 Events.LoadChunk.Add(onLoadChunk)
+ApocalipseBR_BuilderChunkHookReady = true
 
 return Place

@@ -28,6 +28,7 @@ Install Project Zomboid Build 42 and the original Workshop item for each compani
 1. Subscribe to this bundle and the originals you use.
 2. Enable each original alongside its companion. On a dedicated server, add the Workshop item IDs to `WorkshopItems` and the corresponding mod IDs to `Mods`. The companion dependency puts the original first.
 3. Keep the enabled mod set consistent between the server and connecting clients, especially for shared Lua patches.
+4. After a dedicated server starts, look for `startup OK` lines from each enabled companion. These checks run with debug mode off. [Startup messages and what they verify](.docs/features/map-load-compatibility-patches.md#dedicated-server-startup-checks)
 
 ## Patch architecture
 

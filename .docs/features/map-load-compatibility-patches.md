@@ -49,6 +49,22 @@ The mod dependency in `42/mod.info` orders each original before its companion. B
 - **Build** [`42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Build.lua`](../../apocalipsebr_basementdig_fix/42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Build.lua) already maintained level markers in an authoritative `LoadChunk` callback. It now calls Mirror and wakes Ladder retries for the loaded chunk through that same callback. Mirror adds underground square lookups, and sprite filtering replaces Lua object scans across unrelated squares. The original light restoration `LoadChunk` callback is still active.
 - **Sync** The upstream `42/media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua` publishes authoritative records, calls Mirror when records change, and applies records to rooms on multiplayer clients. The companion uses the upstream file and protocol.
 
+## Dedicated server startup checks
+
+Each enabled companion has a separate server-side reporter on `Events.OnServerStarted`. It prints a line for each checked Lua file with the companion mod ID and `startup OK` or `startup ERROR`. The messages use normal Lua logging and appear with debug mode off.
+
+| File | What must happen before it reports OK |
+| --- | --- |
+| `LiuDing3DItem.lua` | `OnInitGlobalModData` registers the sledgehammer sprite callback. |
+| `TrueSwimmingShared.lua` | The generated replacement registers the orphan-pontoon sprite callback during `OnLoadedTileDefinitions`. |
+| `Place.lua` | The Builder override registers its chunk migration callback. |
+| `MigrationCache.lua` | The Builder migration index initializes from global mod data. |
+| `aparosa_BD_Build.lua` | The Basement Building override registers its chunk callback. |
+| `aparosa_BD_Ladder.lua` | The ladder override registers its four sprite names for load callbacks. |
+| `aparosa_BD_Mirror.lua` | The server startup handler schedules record recovery. |
+
+An `ERROR` means the companion's reporter ran and its expected step did not finish. Check the enabled mod IDs and earlier Lua errors if a line is missing. The checks confirm hook registration and initialization at startup. Actual chunk visits, repairs, and multiplayer replication are exercised separately.
+
 ## Verification
 
 The initial LiuDing implementation passed a local PZ Studio build and a mocked Fengari check of sprite registration, client authority, item height, repeated conversion and removal failure. The generated True Swimming override passed mocked Lua checks against Workshop 1.11, including pontoon cleanup and the dock behavior. The local 1.9 input passed the orphan-pontoon checks. The Builder override was compared with the installed upstream file. Full-bundle gameplay, client synchronization and timing still need a representative dedicated-server run.

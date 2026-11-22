@@ -340,6 +340,7 @@ local function onLoadChunk(chunk)
     markLoadedChunk(chunk, minZ)
 end
 Events.LoadChunk.Add(onLoadChunk)
+ApocalipseBR_BasementChunkHookReady = true
 
 -- 客の OnObjectAdded（地下の物が届く度に予約と光の計算し直し。2026-09-24 に足した）は 2026-09-26 に外した。
 -- サーバーの印で下の階が chunk の送信に入るので、客で何もしなくても、同じ遊びの中で B1 を掘ってすぐ下を掘った B2 が

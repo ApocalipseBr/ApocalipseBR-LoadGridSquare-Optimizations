@@ -20,6 +20,8 @@ Use lowercase kebab-case filenames and relative Markdown links. Keep this index 
 
 - [2026-11-22 Basement Building load callback validation](reports/2026-11-22-basementdig-load-callbacks.md) records the Kahlua checks and staged package build.
 
+- [2026-11-22 dedicated server startup checks](reports/2026-11-22-server-startup-checks.md) records the seven successful startup checks and their coverage.
+
 ## Features
 
 - [Map-load compatibility patches](features/map-load-compatibility-patches.md) documents LiuDing Tiles, True Swimming, MinidoracatBuilder and BasementDig.

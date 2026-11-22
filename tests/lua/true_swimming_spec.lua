@@ -8,8 +8,9 @@ IsoSpriteManager = {}
 CharacterTrait, MoodleType = {}, {}
 
 load_patch("ApocalipseBR_TrueSwimming_fix", "media/lua/shared/TrueSwimmingShared.lua")
+assert(not ApocalipseBR_TrueSwimmingSpriteHookReady)
 fire("OnLoadedTileDefinitions")
-assert(removeOrphan)
+assert(ApocalipseBR_TrueSwimmingSpriteHookReady and removeOrphan)
 assert(#Events.LoadGridsquare.callbacks == 1, "preserve the shallow-water callback")
 assert(Events.OnSave.callbacks[1] == TrueSwimming.restoreAll)
 

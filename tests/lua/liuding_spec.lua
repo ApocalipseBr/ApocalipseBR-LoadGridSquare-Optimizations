@@ -14,7 +14,9 @@ MapObjects = { OnLoadWithSprite = function(sprite, callback, priority)
     convert = callback
 end }
 loadPatch()
+assert(not ApocalipseBR_LiuDingTilesSpriteHookReady)
 fire("OnInitGlobalModData")
+assert(ApocalipseBR_LiuDingTilesSpriteHookReady)
 assert(convert and #Events.LoadGridsquare.callbacks == 0)
 
 local index, placed, published, rolledBack = 0, 0, 0, 0

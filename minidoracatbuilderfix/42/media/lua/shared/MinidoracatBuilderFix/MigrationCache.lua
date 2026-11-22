@@ -24,6 +24,7 @@ local function initialize()
         data.chunks = {}
         data.revision, data.upstream, data.patch = REVISION, upstream, patch
     end
+    ApocalipseBR_BuilderMigrationCacheReady = true
 end
 
 function Cache.index()

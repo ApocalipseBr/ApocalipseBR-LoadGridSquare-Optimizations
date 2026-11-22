@@ -29,11 +29,12 @@ load("Build")
 load("Ladder")
 load("Mirror")
 fire("OnInitGlobalModData")
-assert(not onLadder, "clients must leave ladder discovery to the server")
+assert(not onLadder and not ApocalipseBR_BasementLadderHookReady, "clients must leave ladder discovery to the server")
 fire("LoadChunk", {}) -- A client must never inspect this chunk.
 client = false
 fire("OnInitGlobalModData")
-assert(onLadder and #Events.LoadGridsquare.callbacks == 0)
+assert(onLadder and ApocalipseBR_BasementLadderHookReady and #Events.LoadGridsquare.callbacks == 0)
+assert(ApocalipseBR_BasementChunkHookReady and not ApocalipseBR_BasementRecoveryReady)
 
 local existingWorkers = #Events.OnTick.callbacks
 local chunk = { getMinLevel = function() return 0 end }
@@ -54,3 +55,6 @@ getCell = function()
 end
 fire("OnTick")
 assert(lookups == 1 and #Events.OnTick.callbacks == existingWorkers, "discard a duplicate stale candidate and detach")
+
+fire("OnServerStarted")
+assert(ApocalipseBR_BasementRecoveryReady, "the server startup callback armed record recovery")

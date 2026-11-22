@@ -45,4 +45,5 @@ end
 
 Events.OnInitGlobalModData.Add(function()
     MapObjects.OnLoadWithSprite(MARKER_SPRITE, convertMarker, 5)
+    ApocalipseBR_LiuDingTilesSpriteHookReady = true
 end)

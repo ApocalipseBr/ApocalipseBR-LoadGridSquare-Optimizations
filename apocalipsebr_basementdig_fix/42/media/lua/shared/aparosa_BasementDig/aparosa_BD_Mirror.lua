@@ -304,6 +304,7 @@ local function startRecovery()
     if not isClient() then
         -- Run after the startup room registration, even if no chunk had copies.
         startTimer(120)
+        ApocalipseBR_BasementRecoveryReady = true
     end
 end
 Events.OnGameStart.Add(startRecovery)
