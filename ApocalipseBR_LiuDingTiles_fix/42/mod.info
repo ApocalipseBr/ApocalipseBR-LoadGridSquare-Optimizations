@@ -1,0 +1,5 @@
+id=ApocalipseBR_LiuDingTiles_fix
+name=ApocalipseBR - LiuDing Tiles Fix
+description=Converts LiuDing sledgehammer markers using a sprite-specific load callback.
+poster=poster.png
+require=\LiuDing_Tiles

@@ -1,0 +1,7 @@
+id=ApocalipseBR_TrueSwimming_fix
+name=ApocalipseBR - True Swimming Fix
+description=Cleans up orphaned True Swimming pontoons using a sprite-specific load callback.
+poster=poster.png
+icon=icon.png
+require=\TrueSwimming
+versionMin=42.0

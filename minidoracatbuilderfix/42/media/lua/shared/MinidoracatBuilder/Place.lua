@@ -1,0 +1,2232 @@
+-- ApocalipseBR override based on MinidoracatBuilderFor42 42.22.2-1.1.1.
+-- Keep the original module path so Project Zomboid loads this implementation through the normal dependency.
+-- 放置：補格子、每格能不能放、依種類建立物件並同步。出處 bt-authority §2、§4.2。
+-- 兩端共用：伺服器（單機在本機）放置；客戶端只用 Place.check 給游標預覽（Check.item 的 preview 不補格子，只查已有的格子）。
+-- 通則：建好物件、設完屬性，才 AddSpecialObject（引擎自己更新室內判定與碰撞），再 transmit 一次。
+-- 客戶端收到 AddItemToMap 不會去重，送兩次就變兩個（IsoObject.java:4419-4460）。
+require "MinidoracatBuilder/Entry"
+require "MinidoracatBuilder/Cost"
+
+local Entry, Rules, Cost = MinidoracatBuilder.Entry, MinidoracatBuilder.Rules, MinidoracatBuilder.Cost
+local Place = MinidoracatBuilder.Place or {}
+MinidoracatBuilder.Place = Place
+
+local F, T = IsoFlagType, IsoObjectType
+local NO_TILE_ID = 20000000 -- 非 tiledef sprite 的預設 id（IsoSprite.java:129-130）
+local NS, EW = GridSquareEdgeFacingDirection.NORTH_SOUTH, GridSquareEdgeFacingDirection.EAST_WEST
+
+-- 格子不存在時補建（原版 ISBuildIsoEntity.lua:526-538）；chunk 沒載入時建不出來（IsoCell.java:4336-4361）
+function Place.square(x, y, z)
+    local cell = getCell()
+    local sq = cell:getGridSquare(x, y, z)
+    if not sq and getWorld():isValidSquare(x, y, z) then sq = cell:createNewGridSquare(x, y, z, true) end
+    if sq then sq:EnsureSurroundNotNull() end
+    return sq
+end
+
+-- 同一張圖不重複放（buildRecipeCode.lua:351-359）
+local function hasSprite(sq, name)
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local spr = objects:get(i):getSprite()
+        if spr and spr:getName() == name then return true end
+    end
+    return false
+end
+
+-- 農作物上不蓋地板（同處，農作物有 Lua 行為）
+local function hasCrop(sq)
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local spr = objects:get(i):getSprite()
+        local s = spr and spr:getName()
+        if s and s:sub(1, 18) == "vegetation_farming" then return true end
+    end
+    return false
+end
+
+-- 格子有這個屬性（旗標或字串鍵）。skip＝要被原地替換掉的那件（Check.item 的 info.replace）：格子的屬性是各物件屬性的
+-- 聯集（IsoGridSquare.RecalcProperties，IsoGridSquare.java:7250-7264），所以有 skip 時逐件看、跳過它。
+-- dirt＝也不算的物件清單（地下室 MOD 的外邊土牆，見 basement）
+local function has(sq, k, skip, ...)
+    local dirt = ...
+    if not sq:has(k) then return false end
+    if not skip and not dirt then return true end
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local o = objects:get(i)
+        local out = o == skip
+        for j = 1, dirt and #dirt or 0 do out = out or o == dirt[j] end
+        if not out then
+            local p = o:getProperties()
+            if p and p:has(k) then return true end
+        end
+    end
+    return false
+end
+
+-- obj 的附加圖（地圖的地面、牆面疊圖，本 MOD 掛的地面覆蓋與牆面疊圖）裡最後一張叫 name 的位置（0 起算），沒有回 nil
+local function attachedAt(obj, name)
+    local list = obj and obj:getAttachedAnimSprite()
+    for i = (list and list:size() or 0) - 1, 0, -1 do
+        local spr = list:get(i):getParentSprite()
+        if spr and spr:getName() == name then return i end
+    end
+    return nil
+end
+Place.attachedAt = attachedAt
+
+-- 一個物件存檔與同步只帶前 255 張附加圖（IsoObject.java:1376、4630-4635；張數只用 1 byte），再多就會消失
+local MAX_ATTACHED = 255
+local function attachedCount(obj)
+    local list = obj and obj:getAttachedAnimSprite()
+    return list and list:size() or 0
+end
+
+-- 牆面疊圖的宿主只認佔住那條邊的東西（和下面 edgeTaken 同一組鍵）：getWall 只看 cutN／cutW，會找到只帶 cutN 的裝飾片
+-- （wallOverlay 種類）或那條邊沒牆時獨立放的牆面疊圖本身。那條邊之後還能蓋牆，新牆插在地板後、它前面，宿主就換人，掛在它
+-- 身上的圖再也找不到（審查 1112 Codex、Claude）。這類照同一條件往後找，找不到就照舊建獨立物件
+local EDGE_KEYS = {
+    N = { F.WallN, F.WallNTrans, F.WallNW, F.collideN, F.DoorWallN, "DoorWallNTrans", F.WindowN, F.HoppableN, F.TallHoppableN },
+    W = { F.WallW, F.WallWTrans, F.WallNW, F.collideW, F.DoorWallW, "DoorWallWTrans", F.WindowW, F.HoppableW, F.TallHoppableW },
+}
+local function holdsEdge(p, edge)
+    if p:has(F.WallOverlay) then return false end
+    if edge == "SE" then return p:has(F.WallSE) end
+    for _, k in ipairs(EDGE_KEYS[edge]) do
+        if p:has(k) then return true end
+    end
+    return false
+end
+local function realWall(sq, o, edge)
+    if not o then return nil end
+    local p = o:getProperties()
+    if p and holdsEdge(p, edge) then return o end
+    local objects, cut = sq:getObjects(), edge == "N" and F.cutN or F.cutW
+    for i = 0, objects:size() - 1 do
+        local x = objects:get(i)
+        local q = x:getProperties()
+        if q and holdsEdge(q, edge) and (edge == "SE" or (q:has(cut) and not q:has(F.WallSE))) then return x end
+    end
+    return nil
+end
+
+-- 牆面疊圖（Rules.onWall）掛在哪一件上，照地圖讀檔（CellLoader.java:201-251）：SE 是牆角柱（getWallSE）；N／W 是那條邊的
+-- 牆（getWall：帶 cutN／cutW、不是牆角柱的第一件，門框、窗框也算，IsoGridSquare.java:4590-4599；再過 realWall）。getWall
+-- 本身是 nil 時才查那條邊的窗（要帶同方向的 WindowN／W），再沒有是同方向的車庫門（:4623-4636），和地圖一樣；getWall 找到
+-- 的被 realWall 拒掉時不往窗、車庫門找。都沒有回 nil：照舊建獨立物件（地圖同一條退路）
+function Place.wallAt(sq, edge)
+    if edge == "SE" then return realWall(sq, sq:getWallSE(), edge) end
+    local north = edge == "N"
+    local w = sq:getWall(north)
+    if w then return realWall(sq, w, edge) end
+    local o = sq:getWindow(north and NS or EW)
+    local p = o and o:getProperties()
+    if o and not (p and p:has(north and F.WindowN or F.WindowW)) then o = nil end
+    return o or sq:getGarageDoor(north)
+end
+Place.EDGES = { "N", "W", "SE" }
+
+-- spr（種類 kind；省略時照 Rules.classify）掛上去的那一件與邊：地面覆蓋（Rules.onFloor）掛在那格的地板、邊是 nil；
+-- 牆面疊圖（Rules.onWall）掛在 Place.wallAt。不掛的種類、或那一件不在時回 nil（牆面疊圖仍回邊）
+function Place.host(sq, spr, kind)
+    kind = kind or Rules.classify(spr)
+    if Rules.onFloor(kind, spr) then return sq:getFloor(), nil end
+    local edge = Rules.onWall(kind, spr)
+    if edge then return Place.wallAt(sq, edge), edge end
+    return nil, nil
+end
+
+-- 這條格邊已經有東西：牆、牆角、門框、窗框、柵欄、門、窗，以及其他擋這條邊的物件
+-- （原版 isObjectSpriteBlockingWallPlacement 看 collideN/W，ISBuildIsoEntity.lua:159-175）。skip、dirt 見 has
+local function edgeTaken(sq, north, skip, dirt)
+    -- 鍵只寫一份（EDGE_KEYS）：這裡和牆面疊圖的宿主判斷要一致
+    for _, k in ipairs(EDGE_KEYS[north and "N" or "W"]) do
+        if has(sq, k, skip, dirt) then return true end
+    end
+    local side = north and NS or EW
+    return sq:getDoor(side) ~= nil or sq:getWindow(side) ~= nil
+end
+
+-- Basement Building（Workshop 3806513504，Mod ID aparosa_BasementDig）：地下室外邊（它記的地下室範圍和沒有房間的格子之間）
+-- 的土牆是最底層，別的牆可以蓋在上面；蓋好它拆掉那條邊的土牆，上層牆拆了它下一個 tick 補回（aparosa_BD_DirtLayer.lua:1-18、
+-- 138-151、196-221）。它只包原版新式建造（:309-397），本工具自己建物件不經過那裡，所以照它的同一份判斷：外邊土牆不算擋，
+-- 外邊不准蓋開口、框、和土牆同一張圖的牆（它的使用者裁定，:131-135、243-266），被擋的回 BLOCKED（不另立原因碼）。
+-- 範圍紀錄兩端都有（伺服器存 Global ModData，客戶端進場後要一份、改了伺服器推，aparosa_BD_Sync.lua:1-16），預覽同一份判斷。
+-- 只在 z < 0、它載入、用到的函式都在時才查；出錯也當沒裝它：土牆照舊擋（BLOCKED），不丟錯。不覆寫它的函式。
+-- 判斷丟過錯的那份（broken）之後一律照沒裝它：pcall 接住的錯照樣進引擎的錯誤計數（pitfalls.md Kahlua 段），拖一排時不要
+-- 每格再丟一次（審查 1107 Grok）。同一個 Lua state 內不再試，重進存檔或重開服才重試（它重載時沿用同一張表）
+local BD_FNS = { "isOuterEdge", "isDirtOnOuterEdge", "isOpeningOnOuterEdge", "isFrameOnDirt", "isDirtLookOnOuterEdge", "clearDirt" }
+local broken
+local function dirtLayer(sq)
+    if sq:getZ() >= 0 then return nil end
+    local D = aparosa_BD_DirtLayer
+    if type(D) ~= "table" or D == broken then return nil end
+    for i = 1, #BD_FNS do
+        if type(D[BD_FNS[i]]) ~= "function" then return nil end
+    end
+    return D
+end
+
+-- 這條邊（k＝"N"／"W"）是它的外邊時，這格上它的外邊土牆；不是外邊或沒有回 nil
+local function outerDirt(D, sq, k)
+    if not D.isOuterEdge(sq:getX(), sq:getY(), sq:getZ(), k) then return nil end
+    local list, objects = {}, sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local o = objects:get(i)
+        if D.isDirtOnOuterEdge(o) then list[#list + 1] = o end
+    end
+    return list[1] and list or nil
+end
+
+local function basementCheck(D, sq, name, n, w)
+    if D.isOpeningOnOuterEdge(sq, name) or D.isFrameOnDirt(sq, name) or D.isDirtLookOnOuterEdge(sq, name) then return true end
+    return false, n and outerDirt(D, sq, "N"), w and outerDirt(D, sq, "W")
+end
+
+-- 它只認實牆的格邊（aparosa_BD_DirtLayer.lua:46-63 edgesOf 的 WallN／WallW／WallNW；門框、窗框它另擋），透明門框、透明牆角
+-- 這類只有字串鍵的它不認：蓋上去它拆了土牆也不補回，所以這幾種的土牆照舊擋（審查 1107 Claude）
+local function bdEdges(spr, n, w)
+    local p = spr:getProperties()
+    local nw = p:has(F.WallNW)
+    return n and (nw or p:has(F.WallN)), w and (nw or p:has(F.WallW))
+end
+
+-- 回 refused（照它的規則外邊不准蓋）, 北邊、西邊不算擋的土牆；沒裝它、不在地下或出錯回 nil（照沒裝它）。
+-- n、w 是 Entry.edges 的格邊；照它認得的再篩（bdEdges），地上不多查
+local function basement(sq, spr, n, w)
+    local D = dirtLayer(sq)
+    if not D then return nil end
+    n, w = bdEdges(spr, n, w)
+    local ok, refused, dn, dw = pcall(basementCheck, D, sq, spr:getName(), n, w)
+    if not ok then
+        broken = D
+        print("[MinidoracatBuilderFor42] Basement Building check failed, treated as not installed: " .. tostring(refused))
+        return nil
+    end
+    return refused, dn, dw
+end
+
+local function doorFrameAt(sq, north)
+    if north then return sq:has(F.DoorWallN) or sq:has("DoorWallNTrans") end
+    return sq:has(F.DoorWallW) or sq:has("DoorWallWTrans")
+end
+
+-- 那條邊（cutN／cutW）上不是窗的物件裡（skip 那件不算），有沒有 WindowShape 等於 shape 的；第二個回傳＝有沒有任何一件寫了形狀。
+-- 窗跳過：IsoWindow 建構子替窗的圖補 cutN／W（IsoWindow.java:84-102）。牆角柱（WallSE）跳過：載入器替它補 cutW
+-- （IsoWorld.java:978-982），室內牆有 296 張柱子帶形狀 3／4，不跳過的話全高窗掛得上只有柱子的西邊
+local function shapedFrame(sq, north, shape, ...)
+    local skip = ...
+    local objects, cut, any = sq:getObjects(), north and F.cutN or F.cutW, false
+    for i = 0, objects:size() - 1 do
+        local o = objects:get(i)
+        local p = o ~= skip and not instanceof(o, "IsoWindow") and o:getProperties()
+        local s = p and p:has(cut) and not p:has(F.WallSE) and p:get("WindowShape")
+        if s then
+            if s == shape then return true, true end
+            any = true
+        end
+    end
+    return false, any
+end
+
+-- 沒有窗框旗標時：同形狀的牆飾或雙開門框牆也算框（原版地圖 walls_exterior_house_06_14 配 fixtures_windows_white_14）。
+-- 那條邊沒有門、沒有擋路的牆（collideN／W）
+local function tallFrame(sq, north, shape)
+    return shape ~= nil and sq:getDoor(north and NS or EW) == nil
+        and not sq:has(north and F.collideN or F.collideW) and (shapedFrame(sq, north, shape))
+end
+
+-- 那條邊有沒有窗框（帶 WindowN／W 的物件）。窗自己的圖也帶（引擎替 windowN／W 補，IsoWorld.java:919-926），跳過窗
+local function windowFrameOn(sq, north)
+    local objects, flag = sq:getObjects(), north and F.WindowN or F.WindowW
+    for i = 0, objects:size() - 1 do
+        local o = objects:get(i)
+        if not instanceof(o, "IsoWindow") and o:getProperties() and o:getProperties():has(flag) then return true end
+    end
+    return false
+end
+local function framesOn(o, sq, north, s)
+    local win = sq:getWindow(north and NS or EW)
+    -- 開著、破了的窗圖照關著那張補屬性（IsoWindow.java:113-126），形狀讀得到。同一條邊另有同形狀的框（兩片牆飾疊著）時拆這片不懸空
+    return win and win:getProperties():get("WindowShape") == s and not windowFrameOn(sq, north)
+        and not shapedFrame(sq, north, s, o) or false
+end
+-- o 是不是那條邊上全高窗最後一個框（tallFrame 認的那種：帶 cut 旗標與 WindowShape、不是牆角柱、同一條邊的窗形狀相同、
+-- 那條邊沒有窗框）。拆了窗會懸空，Dismantle.blocked 照 ATTACHED 擋
+function Place.framesWindow(o, sq)
+    local p = not instanceof(o, "IsoWindow") and o:getProperties()
+    local s = p and not p:has(F.WallSE) and p:get("WindowShape")
+    if not s then return false end
+    return (p:has(F.cutN) and framesOn(o, sq, true, s)) or (p:has(F.cutW) and framesOn(o, sq, false, s)) or false
+end
+
+-- 牆不能把既有的多格家具切開（ISBuildIsoEntity.lua:397-408）：北邊的牆擋 grid y > 0 的片，西邊擋 x > 0
+local function splitsGrid(sq, n, w, skip)
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local o = objects:get(i)
+        local spr = o ~= skip and o:getSprite()
+        local grid = spr and spr:getSpriteGrid()
+        if grid and ((n and grid:getSpriteGridPosY(spr) > 0) or (w and grid:getSpriteGridPosX(spr) > 0)) then
+            return true
+        end
+    end
+    return false
+end
+
+-- IsoDoor 會把同一張表 +2 號當開門的圖（IsoDoor.java:677-689；開著的那張 Rules 不列）；那一號不存在時引擎會建一個空 sprite
+local function doorPairExists(spr)
+    local tileset, num = spr:getName():match("^(.*)_(%d+)$")
+    return tileset ~= nil and Entry.sprite(tileset .. "_" .. (tonumber(num) + 2)) ~= nil
+end
+
+local function floorUnder(sq)
+    return sq:getZ() == 0 or sq:getFloor() ~= nil
+end
+
+local function vegetation(sq)
+    return sq:has(F.canBeCut) or sq:has("tree")
+end
+
+-- 樓梯一片（照原版 BuildRecipeCode.stairs.OnIsValid，buildRecipeCode.lua:169-218）。role＝top／mid／bottom／platform
+-- （Entry.cells）。west＝往西爬的那種，原版叫 north（ISBuildIsoEntity.lua:18-20）。
+-- 不在最高層、不是別組同向樓梯的頂端平台、正上方沒有地板（頭會撞到）；頂片上一層朝平台那邊沒有牆；平台不實心。
+-- 比原版嚴：三片都要踩在地板上（z=0 的地面也算），不放在水上（原版底片不能，中、頂片會補地板），不補懸空的柱子。
+-- 跟其他擋路的東西一樣不放在高草、樹、實心或擋放置的東西上，格上沒有人，也不擋到別的樓梯。
+local function stairsOk(spr, sq, role)
+    if role == "platform" then return not (sq:isSolid() or sq:isSolidTrans()) end
+    local west = Rules.westStairs(spr:getType())
+    local x, y, z = sq:getX(), sq:getY(), sq:getZ()
+    if sq:isVehicleIntersecting() then return false, "VEHICLE" end
+    if z >= getMaximumWorldLevel() or sq:HasStairs() then return false end
+    if sq:hasModData() and sq:getModData()["ConnectedToStairs" .. tostring(not west)] then return false end
+    local above = getCell():getGridSquare(x, y, z + 1)
+    if above and above:getFloor() then return false end
+    if role == "top" and above and above:getWall(not west) then return false end
+    if not floorUnder(sq) or vegetation(sq) or sq:has(F.water) or sq:has(F.taintedWater) then return false end
+    if sq:isSolid() or sq:isSolidTrans() or (sq:has("BlocksPlacement") and not sq:has(F.canBeRemoved)) then return false end
+    if not sq:getMovingObjects():isEmpty() then return false, "OCCUPIED" end
+    return not buildUtil.stairIsBlockingPlacement(sq, true)
+end
+
+-- 格上有斜面（坡道片，本 MOD 蓋的或任何帶 SlopedSurfaceDirection 的物件）時還放得下的：佔格邊的（Entry.EDGE）與掛在牆、
+-- 窗上的（不站在地板上）。其他站在地板上的東西引擎照高度 0 放，坡面卻是 0.05～1（探針：容器、牆、地板都放得下、
+-- 高度都是 0，見 builder-dev placement.md「坡道」）；地板還會把坡道片當成舊地板拆掉（Place.clearFloor）
+local ON_SLOPE = { curtain = true, wallObject = true, windowObject = true, wallOverlay = true }
+local function slopeOk(kind, spr)
+    return Entry.EDGE[kind] or ON_SLOPE[kind] or Rules.onWall(kind, spr) ~= nil
+end
+
+-- 坡道格上原本就有的東西：和 slopeOk 對稱，站在地面上的（家具、容器、燈這類）會埋進斜面，擋。留得下的是地板、地面上的
+-- （地毯、標線、疊圖）、掛在牆或天花板上的（attached）與 slopeOk 收的；草（canBeRemoved）放的時候清掉（clearGrass）。
+-- 認不出種類的照 rampOk 的實心與擋放置那幾條
+local UNDER_SLOPE = { floor = true, floorOverlay = true, overlay = true, attached = true }
+local function rampClear(sq)
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local s = objects:get(i):getSprite()
+        local p = s and s:getProperties()
+        if p and not (p:has(F.solidfloor) or p:has(F.canBeRemoved)) then
+            local kind = Rules.classify(s)
+            if kind and not (UNDER_SLOPE[kind] or slopeOk(kind, s)) then return false end
+        end
+    end
+    return true
+end
+
+-- 一條格邊上有沒有牆、窗、門：北、西邊由這格自己持有（IsoGridSquare.java:3533-3565），旗標同 isSomethingTo 的三項
+-- （isWall＝collideN／W 而且不是窗、isWindow＝windowN／W、isDoor＝doorN／W，IsoGridSquare.java:655-661,788-842），
+-- 不需要另一側的格子
+local function edgeBlocked(sq, north)
+    if not sq then return false end
+    if north then return sq:has(F.collideN) or sq:has(F.windowN) or sq:has(F.doorN) end
+    return sq:has(F.collideW) or sq:has(F.windowW) or sq:has(F.doorW)
+end
+
+-- 格上有沒有往 (dx, dy) 上坡的坡頂片（同 Dismantle.lua 的 rampInto 的找法）
+local function topAt(sq, dx, dy)
+    local objects = sq and sq:hasSlopedSurface() and sq:getObjects()
+    for i = 0, (objects and objects:size() or 0) - 1 do
+        local s = objects:get(i):getSprite()
+        local tx, ty
+        if s then tx, ty = Entry.rampTop(s) end -- Kahlua 的 a and f() 只留一個回傳值
+        if tx == dx and ty == dy then return true end
+    end
+    return false
+end
+-- sq 的北（西）邊是不是某組坡道的坡頂出口（rampOk 查的那條邊的反向）：往北、西上坡的坡頂片在這格或正下方；往南、東的
+-- 在北（西）鄰格或它正下方
+local function rampExit(sq, north)
+    local cell, x, y, z = getCell(), sq:getX(), sq:getY(), sq:getZ()
+    local ux, uy = north and 0 or -1, north and -1 or 0
+    for dz = 0, 1 do
+        if topAt(cell:getGridSquare(x, y, z - dz), ux, uy)
+            or topAt(cell:getGridSquare(x + ux, y + uy, z - dz), -ux, -uy) then return true end
+    end
+    return false
+end
+-- 要放的圖會不會擋那條邊：牆、窗（collideN／W、windowN／W）。門不算：門開著走得過，先放坡道再裝門可以（使用者裁定，
+-- builder-dev placement.md「門開著也擋（刻意）」）；放坡道時的 edgeBlocked 照 isSomethingTo 連門一起擋，門隨時可能被關上
+local function blocksEdge(p, north)
+    if north then return p:has(F.collideN) or p:has(F.windowN) end
+    return p:has(F.collideW) or p:has(F.windowW)
+end
+
+-- 坡道一片（Entry.cells；role＝platform 是坡頂上一層的平台，同樓梯的平台只要不實心）。比照樓梯：不在最高層、踩在地板上
+-- （z=0 的地面也算），不放在高草、樹、水、實心或擋放置的東西上，格上沒有人、沒有車，不擋到樓梯，格上原本的東西留得下
+-- （rampClear）。最上面那片（Entry.rampTop）比照樓梯頂：往平台那條邊、這一層與上一層都沒有牆、窗、門，不然走到坡頂
+-- 過不去。那條邊照持有它的格子查（edgeBlocked）：往北、西上坡是坡頂格與它正上方那格，往南、東是前方格與平台格；
+-- 預覽時另一側的格子可能還沒載入，照樣查得到。格上已經有斜面的由 Place.check 開頭擋（slopeOk）。正上方有地板不擋：
+-- 探針走得過去（見 builder-dev placement.md「坡道」）
+local function rampOk(spr, sq, role)
+    if role == "platform" then return not (sq:isSolid() or sq:isSolidTrans()) end
+    if sq:isVehicleIntersecting() then return false, "VEHICLE" end
+    local x, y, z = sq:getX(), sq:getY(), sq:getZ()
+    if z >= getMaximumWorldLevel() or sq:HasStairs() then return false end
+    if not floorUnder(sq) or vegetation(sq) or sq:has(F.water) or sq:has(F.taintedWater) then return false end
+    if sq:isSolid() or sq:isSolidTrans() or (sq:has("BlocksPlacement") and not sq:has(F.canBeRemoved)) then return false end
+    if not rampClear(sq) then return false end
+    local dx, dy = Entry.rampTop(spr)
+    if dx then
+        local cell, ox, oy = getCell(), x, y
+        if dx + dy > 0 then ox, oy = x + dx, y + dy end -- 往南、東：那條邊是前方格的北、西邊
+        local own, ownUp = sq, cell:getGridSquare(ox, oy, z + 1)
+        if ox ~= x or oy ~= y then own = cell:getGridSquare(ox, oy, z) end
+        if edgeBlocked(own, dy ~= 0) or edgeBlocked(ownUp, dy ~= 0) then return false end
+    end
+    if not sq:getMovingObjects():isEmpty() then return false, "OCCUPIED" end
+    return not buildUtil.stairIsBlockingPlacement(sq, true)
+end
+
+-- 預覽提醒（不擋、伺服器不算）：回 "WINDOW_SHAPE"／"RAMP_EXIT"／nil。只給 Cursor.preview 呼叫。
+-- 窗框沒寫形狀、窗是一般形狀時不提醒（44 個 tileset、730 張窗框牆沒寫形狀，標準窗配木窗框會每次誤報）
+function Place.caution(kind, spr, sq)
+    if not Entry.EDGE[kind] then return nil end
+    local p = spr:getProperties()
+    local n, w = Entry.edges(kind, spr)
+    local shape = kind == "window" and not Rules.framedWindow(spr:getType()) and p:get("WindowShape")
+    if shape then
+        local same, any = shapedFrame(sq, n == true, shape)
+        if not same and (any or Rules.TALL_WINDOW[shape]) then return "WINDOW_SHAPE" end
+    end
+    -- 門不提醒（使用者裁定）。柵欄門、車庫門的圖同時帶 collide，blocksEdge 分不出來，照種類排除
+    if kind ~= "door"
+        and ((n and blocksEdge(p, true) and rampExit(sq, true)) or (w and blocksEdge(p, false) and rampExit(sq, false))) then
+        return "RAMP_EXIT"
+    end
+    return nil
+end
+
+-- 屋頂（原版沒有放屋頂的路徑，bt-newkinds §5.3）：正下方不是樓梯（同原版地板的 HasStairsBelow；一樓也查地下室的樓梯）。
+-- 一樓（z＝0）不查支撐：原版地圖的屋簷、貼牆的邊緣裝飾、帳篷與碉堡頂都放在一樓（離線讀 Muldraugh 的 lotpack，z＝0 的
+-- 屋頂類 74,231 片；使用者 2026-11-09 選全部屋頂類都放行）。地下室不放。二樓起要有東西撐著：正下方那格有牆或屋頂片，
+-- 四鄰往下一層有屋頂片（單斜往上一層接：那片正下方只有天花板，靠斜下方的鄰片撐），或這格、四鄰同一層有地板或屋頂
+-- （四鄰有地板＝connectedWithFloor，不含斜坡）。正下方只有地板不算：z＝1 的正下方是一樓地面，一定帶 solidfloor，算了
+-- 就整片二樓都能浮空蓋（0d1d2f2 這樣做過，實機 plan-sp wrBefore／roBefore 抓到）；更高層的樓板、助手補的天花板也一樣
+-- 不算（同 0a4b161），助手往上一層接的片靠斜下方的屋頂片與同一層先蓋好的片，照圖蓋的順序靠 WAIT。照座標查、不要這格存在：
+-- 客戶端預覽時上一層的格子常常還沒建（Check.item 照樣呼叫）。
+-- planned（只有客戶端預覽一排時給）：同一排前面判定可蓋的屋頂格（鍵＝Place.key），當成撐得住的鄰格。伺服器一項
+-- 一個動作照順序蓋，輪到後面那格時前一格已經在世界上，不必傳。
+-- 屋頂片＝屋頂型別或帶 RoofGroup、而且不是樓板：平屋頂地板片（roofs_01_22 這類，帶 RoofGroup 的 solidfloor 片，分類是地板）
+-- 是樓板，算了的話鋪在一樓就能讓正上方、旁邊上一層浮空蓋（審查第 5 輪）；同一層的支撐照 supports 的 solidfloor 算
+local function roofPiece(sq)
+    if not sq then return false end
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local s = objects:get(i):getSprite()
+        local p = s and s:getProperties()
+        if p and not p:has(F.solidfloor) and (Rules.typeCode(s:getType()) == "roof" or p:has("RoofGroup")) then return true end
+    end
+    return false
+end
+local function supports(sq)
+    return sq ~= nil and (sq:has(F.solidfloor) or roofPiece(sq))
+end
+
+-- 樓上的牆沒有地板時另外兩種撐法（只認牆，kind＝wall；柱子不算）。山牆片和一般牆的屬性一樣（WallN／WallW＋wall），
+-- 伺服器分不出，所以照兩端都查得到的事實放行，兩種都沒有的照舊要地板（不浮空）：
+-- 一、正下方那格同一條邊有牆（getWall：牆、門框、窗框）：屋頂下的山牆疊在一樓的牆上，那一格在屋頂層沒有地板（地圖房子同樣）。
+-- 二、這條邊兩側的格子同一層有屋頂片：牆是那片屋頂的端牆。單斜往上一層接的山牆片正下方那層是空的（建築編輯器在那裡放整面
+-- 的別款牆），靠旁邊的屋頂片撐。照座標查（那一格不必存在）
+local function wallHeld(x, y, z, kind, n, w)
+    if kind ~= "wall" or not (n or w) or z <= 0 then return false end
+    local cell = getCell()
+    local below = cell:getGridSquare(x, y, z - 1)
+    if below and (not n or below:getWall(true) ~= nil) and (not w or below:getWall(false) ~= nil) then return true end
+    return roofPiece(cell:getGridSquare(x, y, z)) or (n and roofPiece(cell:getGridSquare(x, y - 1, z)))
+        or (w and roofPiece(cell:getGridSquare(x - 1, y, z))) or false
+end
+-- 那一格還沒有（客戶端預覽上一層，Check.item）時格邊的東西（Entry.EDGE）照座標查支撐與框，條件同伺服器補出空格子後
+-- Place.check 的那一段；不查的話預覽說能蓋、伺服器回 BLOCKED，照圖蓋那一輪就跳過那片。一般的門要門框、一般的窗要窗框，
+-- 空格子一定沒有；其餘要地板：格子不在＝自己沒有地板，剩引擎 hasFloor(north) 看的鄰格地板（IsoGridSquare.java:3496-3509：
+-- 北邊的看北鄰，否則看西鄰）與 wallHeld（只認牆）。一樓以下不查。只查這兩樣：樓梯出入口、門的配對圖等照舊交給伺服器
+function Place.edgeHeldAt(kind, spr, x, y, z)
+    if z <= 0 then return true end
+    local p = spr:getProperties()
+    if kind == "door" and not Rules.grouped(p) and not Rules.gate(p) then return false end
+    if kind == "window" and not Rules.framedWindow(spr:getType()) then return false end
+    local n, w = Entry.edges(kind, spr)
+    local side = getCell():getGridSquare(n and x or x - 1, n and y - 1 or y, z)
+    return (side ~= nil and side:has(F.solidfloor)) or wallHeld(x, y, z, kind, n, w)
+end
+function Place.key(x, y, z) return (z * 100000 + x) * 100000 + y end
+function Place.roofAt(x, y, z, ...)
+    local planned = ...
+    if z < 0 then return false end
+    local cell = getCell()
+    local below = cell:getGridSquare(x, y, z - 1)
+    if below and below:HasStairs() then return false end -- 一樓也查：地下室的樓梯口上面不蓋（審查 1109 Claude）
+    if z == 0 then return true end
+    if below and (below:getWall(true) or below:getWall(false) or below:getWallSE()) then return true end
+    if roofPiece(below) or roofPiece(cell:getGridSquare(x - 1, y, z - 1)) or roofPiece(cell:getGridSquare(x + 1, y, z - 1))
+        or roofPiece(cell:getGridSquare(x, y - 1, z - 1)) or roofPiece(cell:getGridSquare(x, y + 1, z - 1)) then
+        return true
+    end
+    if planned and (planned[Place.key(x - 1, y, z)] or planned[Place.key(x + 1, y, z)]
+        or planned[Place.key(x, y - 1, z)] or planned[Place.key(x, y + 1, z)]) then
+        return true
+    end
+    return supports(cell:getGridSquare(x, y, z)) or supports(cell:getGridSquare(x - 1, y, z))
+        or supports(cell:getGridSquare(x + 1, y, z)) or supports(cell:getGridSquare(x, y - 1, z))
+        or supports(cell:getGridSquare(x, y + 1, z))
+end
+
+-- 地板：照原版 BuildRecipeCode.floor.OnIsValid（buildRecipeCode.lua:344-370）：正下方不是樓梯（HasStairsBelow），而且
+-- connectedWithFloor（IsoGridSquare.java:3452-3490：一樓一律可以；旁邊同一層有地板，或斜坡頂接到這格）。二樓以上另外：
+-- 正下方那格有牆也撐得住，同屋頂（使用者 2026-11-09 選：站在下面往上鋪，不必先蓋樓梯）；四鄰往下一層有屋頂片也撐得住：
+-- 45 度屋頂屋脊上一層的平頂片（帶 solidfloor，分類是地板）四周只有斜片在下一層，同層一片地板都還沒有。照座標查、不要這格存在
+-- （預覽時上一層的格子常常還沒建）；planned 同屋頂（同一排前面判定可蓋的地板格）
+local SIDES = { { -1, 0, "E" }, { 1, 0, "W" }, { 0, -1, "S" }, { 0, 1, "N" } } -- 鄰格與斜坡朝向（同 connectedWithFloor）
+function Place.floorAt(x, y, z, ...)
+    local planned = ...
+    local cell = getCell()
+    local below = cell:getGridSquare(x, y, z - 1)
+    if below and below:HasStairs() then return false end
+    if z == 0 then return true end
+    if z > 0 and below and (below:getWall(true) or below:getWall(false) or below:getWallSE()) then return true end
+    for _, d in ipairs(SIDES) do
+        local nx, ny = x + d[1], y + d[2]
+        local n = cell:getGridSquare(nx, ny, z)
+        if (n and n:has(F.solidfloor)) or (planned and planned[Place.key(nx, ny, z)]) then return true end
+        local b = cell:getGridSquare(nx, ny, z - 1)
+        if b and (b:getSlopedSurfaceHeight(IsoDirections[d[3]]) == 1 or roofPiece(b)) then return true end
+    end
+    return false
+end
+
+-- 窗簾（原版搬動放窗上物件，ISMoveableSpriteProps.lua:1896-1937；找窗框 getWallForFacing :2651-2691）：
+-- 面向 S、E 的掛在這格的窗框上，面向 N、W 的掛在南邊、東邊那格的窗框上。這格不能是室外：exterior＝沒有房間而且
+-- 沒有屋頂（IsoGridSquare.java:7306-7317），所以自建屋要先有屋頂或上一層地板。同一面不能已經有窗上物件，也不能有
+-- 擋同一面的床單窗簾。關著的那張（編號 −4）要在：不在時建構子會建空 sprite，存檔記它的 id（IsoCurtain.java:91-96）。
+-- 原版還要求玩家不站在室外；這裡不查，伺服器另查走得到。
+local CLASH = { S = T.curtainN, N = T.curtainS, E = T.curtainW, W = T.curtainE }
+local function curtainOk(spr, sq)
+    local facing = spr:getProperties():get("Facing")
+    local clash = facing and CLASH[facing]
+    if not clash or sq:has(F.exterior) then return false end
+    local ns = facing == "N" or facing == "S"
+    local frame = sq
+    if facing == "N" then
+        frame = getCell():getGridSquare(sq:getX(), sq:getY() + 1, sq:getZ())
+    elseif facing == "W" then
+        frame = getCell():getGridSquare(sq:getX() + 1, sq:getY(), sq:getZ())
+    end
+    if not (frame and frame:has(ns and F.WindowN or F.WindowW)) then return false end
+    local tileset, num = spr:getName():match("^(.*)_(%d+)$")
+    local closed = tileset and Entry.sprite(tileset .. "_" .. (tonumber(num) - 4))
+    if not closed or closed:getID() < 0 or closed:getID() == NO_TILE_ID then return false end
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local o = objects:get(i)
+        local op = o:getProperties()
+        if op and op:get("MoveType") == "WindowObject" and op:get("Facing") == facing then return false end
+        if instanceof(o, "IsoCurtain") and o:getType() == clash then return false end
+    end
+    return true
+end
+
+-- 原版疊箱子的高度上限（ISMoveableSpriteProps.lua:1772-1776）：可疊的桌類放在桌類上，總高加上自己的 Surface 不超過 96。
+-- 建造視窗的詳情照它算能疊幾層
+Place.STACK_MAX = 96
+local STACK_MAX = Place.STACK_MAX
+
+-- 疊放模式（使用者 2026-11-12 選 overlap、每格 3 件）：玩家在建造視窗打開「疊放」時，格上已經有實心或擋放置的東西也放。
+-- 圖塊包有很多預先畫好高度、要和別張疊在同一格的圖（櫃台上的爐面、畫成三層的箱子、架子上的衣服），屬性分不出哪些
+-- 是一組，所以交給玩家決定；只給這三種（其他種類本來就各有同格規則）。兩端共用，伺服器照沙盒重算。
+Place.OVERLAP = { furniture = true, container = true, solid = true }
+
+-- 沙盒「同一格最多幾件」（MaxPerSquare）；1＝不能疊放
+function Place.maxPerSquare()
+    return math.max(1, math.floor(tonumber(Entry.settings().MaxPerSquare) or 3))
+end
+
+-- 這一格會擋路的東西與容器有幾件：實心、擋放置或有容器的物件（地板不算；牆、門窗、掛件沒有這些屬性）。
+-- 疊放的上限（沙盒 MaxPerSquare）照它數：同一格的容器數量與殭屍要打的件數跟著上限走，預設 3 和原版疊三個箱子一樣
+function Place.occupants(sq)
+    local n, objects = 0, sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local s = objects:get(i):getSprite()
+        local p = s and s:getProperties()
+        if p and not p:has(F.solidfloor) and (p:has(F.solid) or p:has(F.solidtrans) or p:has("BlocksPlacement")
+            or p:has(F.container)) then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- 疊放模式下，放不下的這一格能不能照疊放放：回 true，或 false 與原因碼（OCCUPIED、SAME_TILE、SQUARE_FULL；沒有碼＝
+-- 這一項或這一格不給疊）。不放寬的：格上有人、殭屍或動物，會擋到樓梯（Place.check 只替實心的新物件查這兩項，
+-- 這裡不管新物件實不實心都查）；沒有地板、高草與樹、樓梯、水；桌上物件（IsTableTop）與掛牆、掛窗的（MoveType）
+-- 照原版各自那一支；兩張桌面同格：引擎讀檔時把後一張墊到前一張上面（IsoGridSquare.FixStackableObjects），預先畫好
+-- 高度的圖會再高一截，所以照原版疊箱子的規則，不走疊放。同一張圖也不疊（可疊的箱子在 Place.check 開頭不擋同一張，
+-- 這裡補上：兩件畫在同一個位置，看起來只有一件）
+local function overlapOk(kind, spr, sq)
+    local max, p = Place.maxPerSquare(), spr:getProperties()
+    if not Place.OVERLAP[kind] or max <= 1 or p:has("IsTableTop") then return false end
+    local mt = p:get("MoveType")
+    if mt and mt ~= "Object" then return false end
+    if not sq:getMovingObjects():isEmpty() then return false, "OCCUPIED" end
+    if sq:getFloor() == nil or vegetation(sq) or sq:HasStairs() or sq:has(F.water) or sq:has(F.taintedWater)
+        or buildUtil.stairIsBlockingPlacement(sq, true, nil) then -- 第三個參數明寫 nil＝兩個方向都查（Kahlua 少傳不保證 nil）
+        return false
+    end
+    if p:has("IsTable") and sq:has("IsTable") then return false end -- 落回原版疊箱子的原因碼（STACK_FULL、NOT_SURFACE）
+    if hasSprite(sq, spr:getName()) then return false, "SAME_TILE" end
+    if Place.occupants(sq) >= max then return false, "SQUARE_FULL" end
+    return true
+end
+
+-- ---------------------------------------------------------------- 水面（使用者 2026-11-13 選 pond=do、cost=shovel）
+-- 水面是原版的水面地板（一般 IsoObject，不是 IsoThumpable）：擋人、擋殭屍，能取（髒）水、釣魚，殭屍不打。
+Place.NATURAL = "blends_natural_01" -- 天然地面（草地、泥土、沙）的圖名開頭
+Place.DIRT = "blends_natural_01_64" -- 原版拆掉 z ≤ 0 的地板換成泥土（ISDismantleAction.lua:82-88）
+
+-- 挖水面時這一件可以跟著消失：草、草地疊圖、不是樹的植被（原版 addFloor 自己拆的那幾種，IsoGridSquare.java:4730-4747；
+-- 只帶 canBeRemoved 的草 addFloor 不拆，Place.dig 先拆）。本工具蓋的植物不算：不替玩家清，退料會跟著不見
+local function soft(o)
+    local p = o:getProperties()
+    if not p or o:getType() == T.tree then return false end
+    if o:hasModData() and o:getModData().builderEntry then return false end
+    if p:has(F.canBeRemoved) or p:has(F.vegitation) then return true end
+    local spr = o:getSprite()
+    local name = spr and spr:getName()
+    return name ~= nil and name:sub(1, 20) == "blends_grassoverlays"
+end
+
+-- 能不能在 sq 挖水面：只在一樓（z＝0）；已經是水 SAME_TILE；地板要是天然地面、不是本工具蓋的地板（IsoThumpable：帳本的退料
+-- 會跟著不見），不然 NOT_NATURAL；格上有人、殭屍、動物 OCCUPIED；地上有物品、屍體，或有草與植被以外的東西（含樹）不挖（BLOCKED）：
+-- 不替玩家清東西，地上的物品不會被水吞掉。地板上掛著本工具的地面覆蓋（記號 builderOverlays，Place.attach）也不挖：地板
+-- 一拆覆蓋和它的退料就跟著不見。車子壓著由 Place.check 開頭擋（VEHICLE）
+local function waterOk(sq)
+    if sq:getZ() ~= 0 then return false end
+    if sq:has(F.water) then return false, "SAME_TILE" end
+    local floor = sq:getFloor()
+    local fs = floor and floor:getSprite()
+    local fname = fs and fs:getName()
+    if not fname or fname:sub(1, #Place.NATURAL) ~= Place.NATURAL or instanceof(floor, "IsoThumpable") then
+        return false, "NOT_NATURAL"
+    end
+    local hung = floor:hasModData() and floor:getModData().builderOverlays
+    if type(hung) == "table" then
+        for _ in pairs(hung) do return false end
+    end
+    if not sq:getMovingObjects():isEmpty() then return false, "OCCUPIED" end
+    if not (sq:getWorldObjects():isEmpty() and sq:getStaticMovingObjects():isEmpty()) then return false end
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local o = objects:get(i)
+        if o ~= floor and not soft(o) then return false end
+    end
+    return true
+end
+
+-- 單機：伺服器與畫面在同一個 Lua，引擎不會對 addFloor 觸發 OnObjectAdded（只有客戶端收到 AddItemToMap 才觸發，
+-- AddItemToMapPacket.java:94），照客戶端那一份重畫水面幾何（client/MinidoracatBuilder/Pond.lua）
+local function redraw(obj)
+    if isClient() or isServer() then return end
+    local Pond = MinidoracatBuilder.Pond
+    if Pond and obj then Pond.onObjectAdded(obj) end
+end
+
+-- 本工具挖的水面：記號 builderEntry 就是現在的圖，圖帶 water 旗標（Dismantle.ours 認它；伺服器另外查地板帳本，
+-- Place.refundOf）。先看 modData：地圖物件多半沒有，一區拆除整區掃時一次引擎呼叫就返回
+function Place.dug(obj)
+    if not obj:hasModData() then return false end
+    local e = obj:getModData().builderEntry
+    if not e then return false end
+    local spr = obj:getSprite()
+    return spr ~= nil and spr:getName() == e and spr:getProperties():has(F.water)
+end
+
+-- 帶本 MOD 記號的坡道一片：一般物件（不是 IsoThumpable，Place.build），記號 builderEntry＝那一組的頭片名，圖帶斜面屬性。
+-- 記號被改過、圖和記號對不上的不算（只看物件與圖，不碰世界）。記號只決定客戶端右鍵選單與一區拆除列不列
+-- （Dismantle.kindOf）；伺服器不看記號：找片照圖與位置（Dismantle.find、Place.rampOrigin），「是不是本 MOD 蓋的」、
+-- 退多少只看頭片那格那一筆帳本（Place.refundOf）
+function Place.ramp(obj)
+    if instanceof(obj, "IsoThumpable") or not obj:hasModData() then return false end
+    local e = obj:getModData().builderEntry
+    local spr = e and obj:getSprite()
+    return spr ~= nil and spr:getProperties():has("SlopedSurfaceDirection") and Entry.rampHead(spr:getName()) == e
+end
+
+-- 坡道任一片（一般物件，圖在湊得成整組的一組裡）→ 那一組頭片那格的 x, y, z 與 Entry.rampSet；只看圖與位置，不看記號。
+-- IsoThumpable（舊版當地板蓋的）、湊不成整組的片、不在格子上的回 nil
+function Place.rampOrigin(obj)
+    if instanceof(obj, "IsoThumpable") then return nil end
+    local spr = obj:getSprite()
+    local name = spr and spr:getName()
+    local head = name and Entry.rampHead(name) -- 先只看圖（照名稱快取）：每件被移除的物件都會來，絕大多數到這裡就結束
+    local set = head and Entry.rampSet(Entry.sprite(head))
+    local sq = set and obj:getSquare()
+    if not sq then return nil end
+    for i = 1, set.n do
+        if set.parts[i]:getName() == name then
+            return sq:getX() - (i - 1) * set.dx, sq:getY() - (i - 1) * set.dy, sq:getZ(), set
+        end
+    end
+    return nil
+end
+
+-- 格上有沒有叫 name 的物件
+local function named(sq, name)
+    local objects = sq and sq:getObjects()
+    for i = 0, (objects and objects:size() or 0) - 1 do
+        local s = objects:get(i):getSprite()
+        if s and s:getName() == name then return true end
+    end
+    return false
+end
+
+-- sq 上叫 name 的那件是不是某一組坡道或樓梯補的平台（Place.build 的 platform 那格；框選用：那一組收進藍圖時平台跟著
+-- 整組一起蓋，Capture）。只看圖與位置、不看記號：
+--   坡道：某一組最上面那片（Entry.rampTop）在這格往下坡方向一格、下一層，name 是那一組會補的平台圖（set.deck）
+--   樓梯：下一層、頂片往上爬那一側有一座湊得成整組的樓梯（頂片、中片、底片的圖照 Entry.cells），name 是它會補的平台圖
+-- 是的話回 那一組的錨點 x, y, z（坡道頭片、樓梯頂片：藍圖記那一組的位置），框選讀到後記成那一組的那一片的 x, y 與圖名
+-- （坡道頭片、樓梯底片，同一層）；否則 nil
+local RAMP_STEPS = { { 0, -1 }, { 1, 0 }, { 0, 1 }, { -1, 0 } }
+function Place.deckOwner(name, sq)
+    local ramp = Entry.isRampDeck(name)
+    if not (ramp or name == Entry.STAIR_FLOOR) then return nil end
+    local cell, x, y, z = getCell(), sq:getX(), sq:getY(), sq:getZ() - 1
+    for _, d in ipairs(RAMP_STEPS) do
+        local below = cell:getGridSquare(x - d[1], y - d[2], z)
+        local objects = below and below:hasSlopedSurface() and below:getObjects()
+        for i = 0, (objects and objects:size() or 0) - 1 do
+            local o = objects:get(i)
+            local s = o:getSprite()
+            local dx, dy
+            if s then dx, dy = Entry.rampTop(s) end -- Kahlua 的 a and f() 只留一個回傳值
+            if dx == d[1] and dy == d[2] then
+                local hx, hy, hz, set = Place.rampOrigin(o)
+                -- 頭片要真的在（被砸、被燒掉的殘組不算：框選收不到坡道，平台要照一般地板收）
+                if hx and set.deck == name and named(cell:getGridSquare(hx, hy, hz), set.parts[1]:getName()) then
+                    return hx, hy, hz, hx, hy, set.parts[1]:getName()
+                end
+            end
+        end
+    end
+    if ramp then return nil end
+    -- 樓梯：W 型的頂片在平台東邊一格、底片再往東兩格；N 型往南（Entry.cells 的 platform 在頂片前一格）
+    for _, d in ipairs({ { 1, 0 }, { 0, 1 } }) do
+        local bx, by = x + 3 * d[1], y + 3 * d[2]
+        local objects = cell:getGridSquare(bx, by, z)
+        objects = objects and objects:getObjects()
+        for i = 0, (objects and objects:size() or 0) - 1 do
+            local s = objects:get(i):getSprite()
+            local t = s and s:getType()
+            if t == T.stairsBW or t == T.stairsBN then
+                local c = Entry.cells(s)
+                local top, mid, plat = c[1], c[2], c[4]
+                if plat and plat[5] == "platform" and plat[1] == -d[1] and plat[2] == -d[2] and plat[4]:getName() == name
+                    and named(cell:getGridSquare(x + d[1], y + d[2], z), top[4]:getName())
+                    and named(cell:getGridSquare(x + 2 * d[1], y + 2 * d[2], z), mid[4]:getName()) then
+                    return x + d[1], y + d[2], z, bx, by, s:getName()
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- 填平換回哪張：挖之前記的地板（builderWater；照挖的條件只收天然地面、圖還在）；沒記到或不對的換泥土
+function Place.waterBase(obj)
+    local b = obj:hasModData() and obj:getModData().builderWater
+    if type(b) == "string" and b:sub(1, #Place.NATURAL) == Place.NATURAL and Entry.sprite(b) then return b end
+    return Place.DIRT
+end
+
+-- 照原版 addFloor 在「沒有地板」的格子放一片（挖與填平都先拆掉舊的）：它清這一格的水面幾何、送給客戶端
+-- （IsoGridSquare.java:4726-4795）。引擎丟的例外 Kahlua 只記 log、回 nil，新地板這時可能已經加進格子但還沒重算、
+-- 還沒送出（加入物件在前）：這種半套的一律拿掉，回 nil，由呼叫端退回確定的狀態，不當成放好了
+local function layFloor(sq, name)
+    local obj = sq:addFloor(name)
+    if obj and sq:getObjects():contains(obj) then return obj end
+    local left = sq:getFloor()
+    if left then sq:transmitRemoveItemFromSquare(left, false) end
+    return nil
+end
+
+-- 挖（伺服器）：記下原本的地板圖名，拆掉格上的草、植被與原地板（只拆這一格，Place.clearFloor；waterOk 已確定格上只有
+-- 這些），再放水面。物件已經送出，記號另外 transmitModData（存檔跟著物件）。伺服器在地板帳本記一筆空的退料：這片是不是
+-- 本工具挖的以帳本為準（Place.refundOf）。水面放不上去：補回原本的地面（補不上就把拆掉的那片原地板放回去）再報錯。
+-- 放上去就記進 placed（{ water = 物件 }，同 Place.attach 的紀錄），後面出錯時 Place.undo 換回地面。不登記水面 zone
+-- （那一帶會沒有「釣魚」，原型 Q4）
+function Place.dig(sq, spr, placed)
+    local floor = sq:getFloor()
+    local fs = floor and floor:getSprite()
+    local base = fs and fs:getName()
+    Place.repush(sq, nil) -- 區域資料補推：下面先拆地板再放水面，引擎各送一次更新，中間那次（沒有地板）也可能只記進一份
+    Place.clearFloor(sq)
+    local obj = layFloor(sq, spr:getName())
+    if not obj then
+        if not layFloor(sq, base or Place.DIRT) and floor then sq:transmitAddObjectToSquare(floor, -1) end
+        error("water not placed at " .. sq:getX() .. "," .. sq:getY())
+    end
+    if placed then placed[#placed + 1] = { water = obj } end
+    -- 這一格不再長東西（同 placeFloor）：侵蝕照挖之前的天然地面分了類，時間到會在水面上長出草木
+    sq:disableErosion()
+    if isServer() then sendServerCommand("erosion", "disableForSquare", { x = sq:getX(), y = sq:getY(), z = sq:getZ() }) end
+    local md = obj:getModData()
+    md.builderEntry, md.builderWater = spr:getName(), base
+    obj:transmitModData()
+    local Floors = MinidoracatBuilder.Floors
+    if Floors then Floors.put(obj, {}) end
+    redraw(obj)
+    return obj
+end
+
+-- 填平（伺服器）：移除水面、換回原本的地面。移除時引擎丟的例外 Kahlua 只記 log：確認已經不在格子上才補地；原本的地面
+-- 補不上去就補泥土；兩張都補不上（addFloor 本身壞了）就把水面照原樣放回去、帳本重記，再報錯，不留一格沒有地板
+function Place.fill(obj)
+    local sq = obj:getSquare()
+    local base = Place.waterBase(obj)
+    Place.repush(sq, nil) -- 區域資料補推：同 Place.dig，先拆水面再補地
+    sq:transmitRemoveItemFromSquare(obj, false)
+    if sq:getObjects():contains(obj) then error("water not removed at " .. sq:getX() .. "," .. sq:getY()) end
+    local floor = layFloor(sq, base) or layFloor(sq, Place.DIRT)
+    if not floor then
+        sq:transmitAddObjectToSquare(obj, -1)
+        local Floors = MinidoracatBuilder.Floors
+        if Floors then Floors.put(obj, {}) end
+        error("no floor after filling water at " .. sq:getX() .. "," .. sq:getY())
+    end
+    redraw(floor)
+end
+
+-- 能不能在 sq 放 spr（種類 kind）。成功回 true 與桌面高度（放在桌上、疊上去的物件要墊高，原版搬家具算的）；
+-- 失敗回 false 與原因碼（游標分原因說；nil＝其他，Check.item 回 BLOCKED）：
+--   SAME_TILE：同一格已經有同一張圖（不是可疊的）。VEHICLE：車子壓著。OCCUPIED：會擋路的東西那格有人、殭屍或動物。
+--   STACK_FULL：可疊的箱子疊到原版的高度上限。NOT_SURFACE：可疊的箱子放在可疊、卻不是桌面的箱子上。
+--   NOT_NATURAL：樹叢、樹籬、墓碑這類（MoveType 是 Vegitation）放在不是天然地面的地板上；水面挖在不是天然地面的格子（waterOk）。
+--   SQUARE_FULL：疊放模式下這一格已經到沙盒的上限。
+-- player 只給原版搬家具的判斷讀玩家所在格（窗上物件）；擺放技能與工具不查（placeTool 已清掉）。
+-- role：多格項目裡這一格的角色（Entry.cells 第 5 欄；樓梯、坡道有）。planned：見 Place.roofAt。
+-- replacing：要被原地替換掉的那件（Check.item 的 info.replace.obj）：它佔的格邊、它的實心與擋放置都不算擋；
+-- 同一張圖照樣擋（同一張不算替換）。原版搬家具的判斷（IsMoveAble）不能叫它跳過，照舊看整格。
+-- overlap：疊放模式（見 overlapOk）。照原本的規則放得下就照原本的（桌上、疊箱子的高度照舊），放不下才照疊放，
+-- 這時第三個回傳值是 true（游標寫「疊放」、伺服器 log 記 over）；和 replacing 不會同時有（Check.item 疊放時不找替換）。
+function Place.check(kind, spr, sq, ...)
+    local player, role, planned, replacing, overlap = ...
+    if sq:hasSlopedSurface() and not slopeOk(kind, spr) then return false end
+    if kind == "stairs" then return stairsOk(spr, sq, role) end
+    if kind == "ramp" then return rampOk(spr, sq, role) end
+    if sq:isVehicleIntersecting() then return false, "VEHICLE" end
+    if kind == "water" then return waterOk(sq) end
+    overlap = overlap == true -- Kahlua 少傳的參數不保證是 nil（家族 pitfalls）：只認明確的 true
+    local p = spr:getProperties()
+    -- 可疊的（IsStackable：軍用箱、紙箱這類）同一張也能疊，高度交給下面原版搬家具的判斷
+    if not p:has("IsStackable") and hasSprite(sq, spr:getName()) then return false, "SAME_TILE" end
+    if kind == "floor" and hasCrop(sq) then return false end
+    local host, edge = Place.host(sq, spr, kind)
+    if host or Rules.onFloor(kind, spr) then
+        -- 掛上去（Place.attach）：那一件上還沒有同一張（地圖原有的也算）、附加圖還沒滿。地面覆蓋要有地板、不蓋在高草、
+        -- 樹上；牆面疊圖那條邊沒有牆時不走這裡，往下照獨立物件判斷
+        if host and attachedAt(host, spr:getName()) then return false, "SAME_TILE" end
+        return host ~= nil and attachedCount(host) < MAX_ATTACHED and (edge ~= nil or not vegetation(sq))
+    end
+    if kind == "floor" then return Place.floorAt(sq:getX(), sq:getY(), sq:getZ(), planned) end
+    if kind == "roof" then return Place.roofAt(sq:getX(), sq:getY(), sq:getZ(), planned) end
+    if kind == "curtain" then return curtainOk(spr, sq) end
+    if Entry.EDGE[kind] then
+        if sq:HasStairs() then return false end
+        local n, w = Entry.edges(kind, spr)
+        local refused, dirtN, dirtW = basement(sq, spr, n, w)
+        if refused then return false end
+        if kind == "door" and not Rules.grouped(p) then
+            -- 門要放進同方向、還沒有門的門框（原版 isValidPerSquare：有門框、沒有門），開門的圖也要在。柵欄門（Rules.gate）
+            -- 沒有門框時照下面一般格邊判斷：那條邊空著就能蓋（原版配方的 dontNeedFrame，ISBuildIsoEntity.lua:302-310）。
+            -- 車庫門、雙開門（開門的圖由 Entry.doorSet 驗）照下面一般格邊判斷：車庫門本身帶牆屬性，雙開門原版配方也不要門框
+            -- （entity_wood_doubledoor.txt 的 dontNeedFrame）
+            if not doorPairExists(spr) then return false end
+            if (n and doorFrameAt(sq, true) and sq:getDoor(NS) == nil and sq:getWindow(NS) == nil)
+                or (w and doorFrameAt(sq, false) and sq:getDoor(EW) == nil and sq:getWindow(EW) == nil) then
+                return true
+            end
+            if not Rules.gate(p) then return false end
+        end
+        -- 一般的窗要放進同方向、還沒有窗的窗框；沒有窗框時同形狀的牆飾或雙開門框牆也行（tallFrame，全高窗原版沒有窗框牆）。
+        -- 牆型窗（Rules.framedWindow：窗和窗框同一張，地圖也不另放窗框）照下面一般格邊判斷：那條邊已經有窗框（地圖的或
+        -- 本工具蓋的）、牆、窗時 edgeTaken 擋下，不疊兩層框（BLOCKED）。雙開門框牆上有窗時門放不進（上面門分支）
+        if kind == "window" and not Rules.framedWindow(spr:getType()) then
+            local shape = p:get("WindowShape")
+            return (n and sq:getWindow(NS) == nil and (sq:has(F.WindowN) or tallFrame(sq, true, shape)))
+                or (w and sq:getWindow(EW) == nil and (sq:has(F.WindowW) or tallFrame(sq, false, shape)))
+        end
+        -- 不擋樓梯：底片前面、頂片上一層出口那條邊不能蓋（原版木牆、門框都查，ISWoodenWall.lua:129、
+        -- ISWoodenDoorFrame.lua:46、ISBuildUtil.lua:438-480）
+        if (n and buildUtil.stairIsBlockingPlacement(sq, true, true))
+            or (w and buildUtil.stairIsBlockingPlacement(sq, true, false)) then
+            return false
+        end
+        -- 樓上的牆要踩在地板上（ISWoodenWall:isValid），或疊在正下方同一條邊的牆上、靠著同一層的屋頂片（wallHeld）
+        if not floorUnder(sq) and not sq:hasFloor(n) and not wallHeld(sq:getX(), sq:getY(), sq:getZ(), kind, n, w) then
+            return false
+        end
+        if not n and not w then return not has(sq, F.WallSE, replacing) end -- 柱子
+        return not ((n and edgeTaken(sq, true, replacing, dirtN)) or (w and edgeTaken(sq, false, replacing, dirtW))
+            or splitsGrid(sq, n, w, replacing))
+    end
+    -- 會擋路的東西：格上有人、殭屍或動物，或會擋到樓梯時不放（原版 isFree(true)、stairIsBlockingPlacement）
+    if p:has(F.solid) or p:has(F.solidtrans) then
+        if not sq:getMovingObjects():isEmpty() then return false, "OCCUPIED" end
+        if buildUtil.stairIsBlockingPlacement(sq, true, nil) then return false end
+    end
+    if p:has("IsMoveAble") then
+        -- 原版搬家具放下的判斷（地板、桌面、掛牆要有牆、窗上物件要有窗框、地毯不疊、箱子疊多高…），伺服器能跑（bt-authority §4.2）。
+        -- 成功時回的不一定是 true（掛牆時回那面牆），照真假看。
+        local props = ISMoveableSpriteProps.new(spr)
+        -- 不要求原版的擺放技能與工具（設計稿：工具照 Cost）：placeTool 是 nil 時 hasRequiredSkill／hasTool 都放行（:1956-1961）
+        props.placeTool = nil
+        if not props:canPlaceMoveableInternal(player, sq, nil) then
+            -- 原版只讓這類放在圖名以 blends_natural 開頭的地面（ISMoveableSpriteProps.lua:1892-1896）：說地面不對，不叫玩家清空
+            if props.type == "Vegitation" then
+                local floor = sq:getFloor()
+                local fs = floor and floor:getSprite()
+                local fname = fs and fs:getName()
+                if fname and string.sub(fname, 1, 14) ~= "blends_natural" then return false, "NOT_NATURAL" end
+            end
+            -- 疊放模式：格上有東西而放不下的，照疊放放（畫好高度的圖不墊高）。樓梯頂照原版不放（:1779）
+            if overlap and not props:isSquareAtTopOfStairs(sq) then
+                local fits, why = overlapOk(kind, spr, sq)
+                if fits then return true, 0, true end
+                if why then return false, why end
+            end
+            -- 疊到頂：照原版疊箱子那一支的條件重算一次，只差高度
+            if props.isStackable and props.isTable and props.surface and sq:has("IsTable") and not sq:has("IsTableTop")
+                and not sq:has("IsHigh") and props:getTotalTableHeight(sq) + props.surface > STACK_MAX then
+                return false, "STACK_FULL"
+            end
+            -- 下面那件可疊卻不是桌面（例：UMCTP 畫好高度的半箱 industry_ddd_02_32）：說下面那件撐不住東西，不叫玩家清空。
+            -- 只在原版疊放那一支本來走得到時才這樣說：自己可疊、是桌面、有 Surface，有地板、不在樓梯頂
+            -- （ISMoveableSpriteProps.lua:1743-1745,1772,1779）；自己不是桌面的（半箱本身）放在哪都疊不上，照舊沒有原因碼。
+            -- 原地替換（replacing）時也不說：擋住的可能是要換掉的那件
+            if props.isStackable and props.isTable and props.surface and not replacing and sq:getFloor()
+                and not props:isSquareAtTopOfStairs(sq) and sq:has("IsStackable") and not sq:has("IsTable") then
+                return false, "NOT_SURFACE"
+            end
+            return false
+        end
+        return true, (props.isTableTop or props.isTable) and props.yOffsetCursor or 0
+    end
+    if not floorUnder(sq) or vegetation(sq) then return false end
+    -- 實心或擋放置的東西（含不能搬的實心容器）不疊在已經實心、已經擋放置的格子上
+    if kind == "solid" or kind == "container" or p:has(F.solid) or p:has(F.solidtrans) then
+        local solid = replacing and (has(sq, F.solid, replacing) or has(sq, F.solidtrans, replacing))
+            or (not replacing and (sq:isSolid() or sq:isSolidTrans()))
+        if not solid and not (has(sq, "BlocksPlacement", replacing) and not sq:has(F.canBeRemoved)) then return true end
+        if not overlap then return false end
+        local fits, why = overlapOk(kind, spr, sq)
+        return fits, fits and 0 or why, fits
+    end
+    return true
+end
+
+-- ---------------------------------------------------------------- 建立
+local function finish(sq, obj, ...)
+    local index = ...
+    sq:AddSpecialObject(obj, index or -1) -- 會呼叫 addToWorld，照 sprite 的 container 屬性建容器（IsoObject.java:4491-4493）
+    obj:setExplored(true) -- 所以排在這之後：蓋出來的容器不生戰利品（ISBuildIsoEntity.lua:745-746）
+    Place.fitContainers(obj) -- 容器也是 addToWorld 建的；容量跟著下一行送給玩家
+    obj:transmitCompleteItemToClients()
+end
+
+-- 拆了退什麼＝付的扣掉 fee（電器費、能撿起的地磚的材質料，拆了不退，Cost.of）
+local function refundable(cost)
+    local out, fee = {}, cost.fee or {}
+    for ft, n in pairs(cost.items) do
+        local v = n - (fee[ft] or 0)
+        if v > 0 then out[ft] = v end
+    end
+    return out
+end
+
+-- 一樓以下（含地下室）的地板：buildMaterials 留空，也不給原版搬動工具拆（isDismantable＝false）；本工具會拆的退料記在
+-- 伺服器的地板帳本（Floors）。見 builder-dev placement.md「一樓地板的退料」
+local function groundFloor(obj, sq)
+    if sq:getZ() > 0 then return false end
+    if obj:isFloor() then return true end
+    local spr = obj:getSprite()
+    return spr ~= nil and spr:getProperties():has(F.solidfloor)
+end
+Place.groundFloor = groundFloor
+
+-- 這一格除了 obj 之外還有 IsoThumpable 的地板（照建的時候設的 isFloor）
+local function otherFloor(sq, obj)
+    local objects = sq:getObjects()
+    for i = 0, objects:size() - 1 do
+        local o = objects:get(i)
+        if o ~= obj and instanceof(o, "IsoThumpable") and o:isFloor() then return true end
+    end
+    return false
+end
+
+-- 車庫門、雙開門的第一片（車庫門頭片、雙開門第 1 片），照引擎找同一組的方式（IsoDoor.getGarageDoorFirst、getDoubleDoorObject，
+-- IsoDoor.java:2785-2843,3146-3161）；不是 IsoDoor、不成組、找不到第一片回 nil。第一片開關時不搬格（車庫門只換圖、雙開門
+-- 只搬第 2、3 片，IsoDoor.java:2650-2754,3191-3217），所以整組的記號與帳本都放在它身上
+function Place.doorAnchor(obj)
+    if not instanceof(obj, "IsoDoor") then return nil end
+    if IsoDoor.getGarageDoorIndex(obj) ~= -1 then
+        local a = IsoDoor.getGarageDoorFirst(obj) -- 找不到頭片時回自己（:3146-3161）
+        return a ~= nil and IsoDoor.getGarageDoorIndex(a) == 1 and a or nil
+    end
+    local i = IsoDoor.getDoubleDoorIndex(obj)
+    if i == -1 then return nil end
+    return i == 1 and obj or IsoDoor.getDoubleDoorObject(obj, 1)
+end
+
+-- 本 MOD 蓋的車庫門、雙開門的一片：第一片帶記號（builderEntry）。雙開門開關時第 2、3 片換成新物件、記號不跟過去
+-- （IsoDoor.java:2738-2742），所以只看第一片。只給介面列、找物件用；退不退料只看伺服器帳本（Place.refundOf）
+function Place.ourDoor(obj)
+    local a = Place.doorAnchor(obj)
+    return a ~= nil and a:hasModData() and a:getModData().builderEntry ~= nil
+end
+
+-- 世界上的車庫門、雙開門任一片（開著、關著，誰蓋的都行）→ 整組：{ e = 項目 ID（第一片關著的圖名，Entry.doorItem），
+-- x, y, z = 第一片那格（錨點）, w = 片數（車庫門照實際連著的片數；雙開門 4）, garage, north, objects = 各片 }。
+-- 第一片找不到、片數不完整（雙開門少片、車庫門少於 2 片）或圖湊不成整組回 nil。照圖擷取、介面列用
+function Place.doorGroup(obj)
+    local a = Place.doorAnchor(obj)
+    local spr = a and a:getSprite()
+    local e = spr and Entry.doorItem(spr:getName())
+    if not e then return nil end
+    local garage = IsoDoor.getGarageDoorIndex(a) ~= -1
+    local list = garage and buildUtil.getGarageDoorObjects(a) or buildUtil.getDoubleDoorObjects(a)
+    if #list < (garage and 2 or 4) then return nil end
+    local sq = a:getSquare()
+    return { e = e, x = sq:getX(), y = sq:getY(), z = sq:getZ(), w = #list, garage = garage, north = a:isNorth(), objects = list }
+end
+
+-- 拆了退什麼（Server.dismantle 與伺服器的原地替換讀，只在伺服器）：燈、家電（Place.keyed）照伺服器帳本；一樓以下的地板照
+-- 地板帳本，現在的圖和蓋的時候一樣、這一格只有它一片地板才退；其他照 buildMaterials。單機讀檔時帳本建好之前讀進來、
+-- 還沒搬的舊地板照 buildMaterials（Place.migrate）。本工具挖的水面也照地板帳本認（Place.dig 記的那筆，圖要一樣），
+-- 不收料所以退空表。車庫門、雙開門照伺服器帳本那一組的一筆（Place.build；obj 是哪一片都行），坡道照頭片那格那一筆
+-- （Place.rampOrigin 照圖與位置推頭片格，不看記號；某片被別的方式移走後那一筆是空表，見 Place.onAboutToBeRemoved）。
+-- 都沒有回 nil。
+local function wipe(t)
+    local keys = {}
+    for k in pairs(t) do keys[#keys + 1] = k end
+    for i = 1, #keys do t[keys[i]] = nil end
+end
+
+-- The ledger and object can become ready at different times during single-player startup.
+-- Leave the old materials intact if an eligible transfer cannot be confirmed.
+local function migrateFloorRefund(obj, id, spr)
+    local Floors = MinidoracatBuilder.Floors
+    if not (Floors and Floors.instance) then return end
+    local name = spr and spr:getName()
+    if obj:isFloor() and name and name == id then
+        local entry = Floors.get(obj)
+        if not entry and Cost.refund("floor", spr) == "builder" then
+            Floors.put(obj, obj:getBuildMaterials())
+            entry = Floors.get(obj)
+            if not entry then return end
+        end
+        if entry and entry.s ~= name then return end
+    end
+    if obj:hasBuildMaterials() then wipe(obj:getBuildMaterials()) end
+end
+
+function Place.refundOf(obj)
+    local door = Place.doorAnchor(obj)
+    if door then
+        local Ledger = MinidoracatBuilder.Ledger
+        return Ledger and Ledger.getDoor(door) or nil
+    end
+    local x, y, z, set = Place.rampOrigin(obj)
+    if x then
+        local Ledger = MinidoracatBuilder.Ledger
+        return Ledger and Ledger.getRamp(x, y, z, set.parts[1]:getName()) or nil
+    end
+    if Place.keyed(obj) then
+        local Ledger, Dismantle = MinidoracatBuilder.Ledger, MinidoracatBuilder.Dismantle
+        local mats = Ledger and Ledger.get(obj)
+        if mats and Dismantle then mats = Dismantle.lightRefund(obj, mats) end
+        return mats
+    end
+    if Place.dug(obj) then
+        local Floors = MinidoracatBuilder.Floors
+        local e = Floors and Floors.get(obj)
+        return e and e.s == obj:getSprite():getName() and e.i or nil
+    end
+    local sq = obj:getSquare()
+    if not (sq and sq:getZ() <= 0 and obj:isFloor()) then return obj:getBuildMaterials() end
+    local Floors = MinidoracatBuilder.Floors
+    local e = Floors and Floors.get(obj)
+    if not e and Floors and Floors.instance
+        and instanceof(obj, "IsoThumpable") and obj:hasModData() then
+        local id = obj:getModData().builderEntry
+        if id then migrateFloorRefund(obj, id, obj:getSprite()) end
+        e = Floors.get(obj)
+    end
+    if e then
+        local spr = obj:getSprite()
+        return spr and e.s == spr:getName() and not otherFloor(sq, obj) and e.i or nil
+    end
+    if isServer() or not obj:hasBuildMaterials() then return nil end -- Dedicated servers require a valid ledger entry.
+    return obj:getBuildMaterials()
+end
+
+-- 退料寫在伺服器建立的 Java 欄位 buildMaterials（原版拆解讀它），一樓以下的地板改記在地板帳本（groundFloor）；
+-- 退多少不看 modData
+-- 門框照原版不給打（entity 門框腳本都是 isThumpable = false）：thumpable 的 IsoThumpable 會被 getSpecialWall 當成牆，
+-- 門開著也走不過去（IsoGridSquare.java:3789-3803）
+-- 樓梯照 Wood_Stairs 剛好 6 級、沒有建造加成時的血量：health 150＋最高相關技能等級 6 × skillBaseHealth 50
+-- （stairs/entity_carpentry_stairs.txt；ISBuildIsoEntity.lua:666-677，等級越高原版越耐打）
+-- 水井與手壓水泵照牆：圖沒有搬運重量與材質，走下面實心物件的通則會是 50 血、每下扣 1
+-- （原版地圖的井不是 IsoThumpable）
+local HEALTH = { wall = 450, windowFrame = 450, fence = 300, stairs = 450, post = 450, well = 450 }
+-- 會擋路（solid／solidtrans）的非格邊物件照原版搬家具放下，都打得壞，而且整格擋住（不然會被 getSpecialWall 當成格邊的牆）：
+--   一般的：原版做成 IsoThumpable，一隻殭屍就能打（thumpDmg 1，IsoThumpable.java:1044-1056），血量＝搬運重量（沒寫當 50）
+--   × 材質倍率（ISMoveableSpriteProps.lua:148,322-325,2379-2388；ISMoveableDefinitions.lua:688-690）。
+--   地毯、掛牆物、放在桌上的：原版做成一般物件再設 movedThumpable（ISMoveableSpriteProps.lua:2330,2501-2504），血量 100、
+--   每下扣「圍著打的殭屍數 ÷ 8」、最多 1，不足 1 的累積（IsoObject.java:207,5736-5748）；IsoThumpable 的 thumpDmg 預設就是 8
+--   （IsoThumpable.java:106,1042-1056 同一算法）。這裡做成 IsoThumpable，和原版那種一般物件差在：受沙盒「殭屍破壞
+--   建築」控制（IsoThumpable.java:1009）、玩家揮武器打得到（CombatManager.java:278-284）。
+-- 回傳血量與 thumpDmg（nil＝不改預設）
+local function solidHealth(p)
+    local mt = p:get("MoveType")
+    if mt == "FloorRug" or mt == "WallObject" or p:has("IsTableTop") then return 100, nil end
+    local mat = p:get("Material")
+    local m = mat and ISMoveableDefinitions:getInstance().getHealthDefinition(mat) or 1
+    return (tonumber(p:get("PickUpWeight")) or 50) * m, 1
+end
+-- 照種類與圖塊算耐久與 thumpDmg（hp 是 nil＝照原版不打：門框、地板、不擋路的東西；dmg 是 nil＝不改預設）
+local function isSolid(kind, p) return not Entry.EDGE[kind] and (p:has(F.solid) or p:has(F.solidtrans)) end
+local function durability(kind, p)
+    if kind ~= "well" and isSolid(kind, p) then return solidHealth(p) end
+    return HEALTH[kind], nil
+end
+-- 沙盒「殭屍打不壞」（ZombieProof，使用者 2026-11-01 選「不打，也不找路穿過」）：IsoThumpable 不給打，原生尋路把它當一般的牆
+-- （getThumpableFor 看 isThumpable，IsoThumpable.java:1108-1141；nativeCode/SquareUpdateTask.java:334-381），玩家武器也打不到
+-- （:1148-1157,1564），大錘不看它（ISDestroyCursor.lua:293-361）。爬行殭屍對低柵欄不看 isThumpable（:1111-1117），所以 thumpDmg
+-- 也調到最大：每下只扣「圍著打的殭屍數 ÷ thumpDmg」（:1029-1041）。PROOF_DMG 減 0..3 同時是「照選項改過」的記號（引擎欄位、
+-- 隨存檔，不靠 modData），減的數記改之前的樣子：1＝原本可打，2＝原本 thumpDmg 是 1（不然是預設 8）。關掉時照它還原，
+-- 不重新分類（Rules 改版、圖塊換成損壞圖時分類會變）
+local PROOF_DMG = 2147483647
+local function proofDmg(thump, dmg) return PROOF_DMG - (thump and 1 or 0) - (dmg == 1 and 2 or 0) end
+-- 沙盒「殭屍敲不破門」（ZombieProofDoors，使用者 2026-11-01 要求和上面分開）：門沒有不給打的旗標（IsoDoor.java:1042-1056），
+-- 只能把耐久調高；maxHealth 沒有 setter（:2401,2639），關掉時夾回 maxHealth（建構子照圖塊設的，:807-821）
+local DOOR_HP = 1000000000
+local function proof(key) return Entry.settings()[key] == true end
+-- 蓋好後的耐久, 目前沙盒下殭屍打不打得壞（詳情用；數字和 thumpable、Place.build 同一份）。nil＝殭屍本來就不打
+function Place.durabilityOf(kind, spr)
+    local p = spr:getProperties()
+    if kind == "door" then return spr:getName():find("fences", 1, true) and 100 or 500, proof("ZombieProofDoors") end -- IsoDoor.java:103,704-715
+    if kind == "window" then return 50, false end -- IsoWindow.java:65,139-141：一律單層玻璃
+    if kind == "light" or (kind == "container" and Place.applianceOf(spr)) then -- 一般物件，擋路的才打得壞（IsoObject.java:207）
+        if not (p:has(F.solid) or p:has(F.solidtrans)) then return nil end
+        return 100, proof("ZombieProof")
+    end
+    if kind == "ramp" or kind == "water" or kind == "curtain" then return nil end
+    local hp = durability(kind, p)
+    if not hp then return nil end
+    return hp, proof("ZombieProof")
+end
+local function thumpable(c, kind, north)
+    local sq, spr = c.sq, c.spr
+    local p = spr:getProperties()
+    local obj = IsoThumpable.new(getCell(), sq, spr:getName(), north, {})
+    local solid = isSolid(kind, p)
+    -- 柱子照原版補的轉角柱（ISBuildUtil.lua:89-93）：轉角、不可穿過（IsoThumpable 預設 false，IsoThumpable.java:112）。
+    --   不設轉角的話 north＝false 的柱子會被當成這一格的西牆，殭屍走過西邊那條線時把它當目標打（IsoGridSquare.java:3801
+    --   getSpecialWall、:4027 testCollideSpecialObjects、IsoZombie.java:3665）。可穿過的話原生尋路找格邊能不能打時，
+    --   遇到它就回「不能打」，連同一格的牆也遮掉（nativeCode/SquareUpdateTask.java:356-381 遇到第一個 IsoThumpable 就回）。
+    --   斜走會被擋，和原版一樣（IsoThumpable.java:911-930）。擋格邊的圖 Rules 不列（BLOCKS_EDGE），柱子都不擋格邊
+    local corner = kind == "post"
+    -- 其餘屬性照原版 entity 建造推（ISBuildIsoEntity:setInfo，ISBuildIsoEntity.lua:620-637）
+    obj:setCanPassThrough(not corner and not (p:has(F.solid) or p:has(F.solidtrans) or p:has(F.WallN)
+        or p:has(F.WallNTrans) or p:has(F.WallW) or p:has(F.WallWTrans) or p:has(F.WallNW)))
+    -- 草與野花（Rules.isGrass）帶 BlocksPlacement 的也不擋整格：擋整格的 IsoThumpable 會建實心碰撞（IsoChunk.java:2025-2057、
+    -- IsoThumpable.java:858-866），原版地圖的草是一般物件、走得過去
+    obj:setBlockAllTheSquare(solid or (p:has("BlocksPlacement") and not Rules.isGrass(kind, p)))
+    obj:setIsHoppable(kind == "fence")
+    obj:setIsDoorFrame(kind == "doorFrame")
+    obj:setCorner(corner)
+    obj:setCanBarricade(kind == "windowFrame")
+    obj:setIsFloor(kind == "floor")
+    local hp, dmg = durability(kind, p)
+    if proof("ZombieProof") then
+        obj:setThumpDmg(proofDmg(hp ~= nil, dmg))
+        obj:setIsThumpable(false)
+    else
+        if dmg then obj:setThumpDmg(dmg) end
+        obj:setIsThumpable(hp ~= nil) -- 門框、地板、不擋路的東西照原版不打
+    end
+    obj:setIsDismantable(not groundFloor(obj, sq))
+    hp = hp or 200
+    obj:setMaxHealth(hp)
+    -- 原地替換照舊件剩下的耐久比例（c.wear，Server.complete 給）：換一款不能順便修好被打壞的
+    obj:setHealth(c.wear and math.max(1, math.floor(hp * c.wear)) or hp)
+    if c.yoff and c.yoff ~= 0 then obj:setRenderYOffset(c.yoff) end -- 放在桌上（ISMoveableSpriteProps.lua:2468-2479）
+    if not groundFloor(obj, sq) then
+        local mats = obj:getBuildMaterials()
+        for ft, v in pairs(refundable(c.cost)) do mats[ft] = tostring(v) end
+    end
+    obj:getModData().builderEntry = spr:getName()
+    -- 名稱一定要有：爬窗框時引擎拿 IsoThumpable 的名稱比 "Barbed Fence"（ClimbThroughWindowState.java:582），null 就
+    -- NullPointerException、每幀一次、角色卡在窗框前（E2E builder-batch-1101rg2）。原版建造一律 setName（ISBuildUtil.lua:371）；
+    -- 這裡用圖名（不是顯示名稱：物件名稱會存檔並同步）
+    obj:setName(spr:getName())
+    -- 水槽這類接水管的：照原版搬家具，放好要重新接水管才有水（ISMoveableSpriteProps.lua:2491-2494；IsoObject.java:2653-2657）
+    if p:has(F.waterPiped) then obj:getModData().canBeWaterPiped = true end
+    return obj
+end
+
+-- 地毯：原版建地板照名稱認（buildRecipeCode.lua:248,387），搬動照 MoveType 認（ISMoveableSpriteProps.lua:1884）。圖塊包的
+-- 地毯沒有那個名稱、有的還帶 solidfloor（Rules.kindOf），兩種都認。Server.complete 換地板時掛回的地毯也照這份
+function Place.isRug(name, p)
+    return (name or ""):find("floors_rugs", 1, true) ~= nil or (p ~= nil and p:get("MoveType") == "FloorRug")
+end
+local function isRug(o, p) return Place.isRug(o:getTextureName(), p) end
+
+-- 地板：照原版 floor.OnCreate（buildRecipeCode.lua:372-437），差別是先拆舊的再放新的（同一格先刪後加，索引才對得上，
+-- bt-authority §2.1-4），地毯留著、新地板插在地毯前面；沒有地毯時插回舊地板原本的位置（原版加在最後：同一格已有家具時
+-- 地板排到家具後面，之後蓋的牆照「插在最後一個地板後面」也跟著排到家具後面，見 edgeIndex）。舊物件只拆這一格的那片：
+-- 多格的一組照原版整組拆會動到沒驗證過的格子（IsoGridSquare.java:5933-5956）。IsoThumpable 的地板照建的時候設的
+-- isFloor 拆，不看現在的圖：地板帳本一格只記一筆（Floors）。回新地板該插的位置，或 nil（加在最後）
+function Place.clearFloor(sq)
+    local objects, rug, at = sq:getObjects(), nil, nil
+    for i = objects:size() - 1, 0, -1 do
+        local o = objects:get(i)
+        local p = o:getProperties()
+        local tex = o:getTextureName() or ""
+        local floor = instanceof(o, "IsoThumpable") and o:isFloor()
+        local remove = floor
+        if not floor and isRug(o, p) then
+            rug = o
+        elseif not floor then
+            remove = p and (p:has(F.canBeRemoved) or p:has(F.solidfloor) or p:has(F.noStart) or p:has(F.taintedWater)
+                or (p:has(F.vegitation) and o:getType() ~= T.tree)) or tex:find("blends_grassoverlays", 1, true)
+        end
+        if remove then
+            sq:transmitRemoveItemFromSquare(o, false)
+            -- 由後往前拆：拆到地板記它的位置；之後拆掉它前面的東西，位置跟著往前一格
+            if floor or (p and p:has(F.solidfloor)) then
+                at = i
+            elseif at then
+                at = at - 1
+            end
+        end
+    end
+    return rug and objects:indexOf(rug) or at
+end
+
+local function placeFloor(sq, obj)
+    local index = Place.clearFloor(sq)
+    finish(sq, obj, index)
+    sq:EnsureSurroundNotNull()
+    sq:RecalcProperties()
+    local x, y, z = sq:getX(), sq:getY(), sq:getZ()
+    DesignationZoneAnimal.addNewRoof(x, y, z)
+    sq:getCell():checkHaveRoof(x, y)
+    for zz = z - 1, 0, -1 do -- 下面幾層補格子並重算
+        local below = getCell():getGridSquare(x, y, zz)
+        if not below then
+            below = IsoGridSquare.getNew(getCell(), nil, x, y, zz)
+            getCell():ConnectNewSquare(below, false)
+        end
+        below:EnsureSurroundNotNull()
+        below:RecalcAllWithNeighbours(true)
+    end
+    sq:clearWater()
+    sq:disableErosion()
+    if isServer() then sendServerCommand("erosion", "disableForSquare", { x = x, y = y, z = z }) end
+    redraw(obj) -- 單機蓋在水面旁或水面上：周圍的水面幾何照新地板重畫（多人由客戶端的 Pond 處理）
+end
+
+-- 牆、柵欄、門框、窗框插在最後一個 solidfloor 物件後面；門插在同方向的門框後面，沒有門框照牆。照 42.22 原版建好後重插
+-- （buildRecipeCode.lua:625-674 的 fenceOrWall／door／doorFrame／windowFrame OnCreate；42.22 更新說明「Fixed certain walls
+-- visually overlapping objects when built behind them」），格上物件的順序和原版蓋的一樣。實機同一格先放櫃子再蓋北牆，
+-- 牆排在櫃子前後畫面沒有差別（E2E pz42222-sp 的 wallOrder，42.22.2），所以這只是和原版一致，不是看得到的修正。
+-- 柱子照原版補的轉角柱加在最後（ISBuildUtil.lua:96，原版沒有重插）。AddSpecialObject 接著照
+-- placeWallAndDoorCheck 讓門排在牆後、牆排在門前（IsoGridSquare.java:5799-5811,5884-5918），42.21 與 42.22 相同。
+-- 客戶端照伺服器那份的位置插（AddItemToMap 帶 getObjectIndex，IsoObject.loadFromRemoteBuffer）
+local REINSERT = { wall = true, fence = true, doorFrame = true, windowFrame = true }
+local function edgeIndex(sq, kind, north)
+    local objects = sq:getObjects()
+    if kind == "door" then
+        local frame = north and T.doorFrN or T.doorFrW
+        for i = objects:size() - 1, 0, -1 do
+            if objects:get(i):getType() == frame then return i + 1 end
+        end
+    end
+    for i = objects:size() - 1, 0, -1 do
+        local p = objects:get(i):getProperties()
+        if p and p:has(F.solidfloor) then return i + 1 end
+    end
+    return -1
+end
+
+local function placeWindow(sq, obj, north, ...)
+    local window = ...
+    local index = -1
+    local objects = sq:getObjects()
+    local cut, shape = north and F.cutN or F.cutW, window and obj:getProperties():get("WindowShape")
+    -- 窗、面向 S／E 的窗簾插在窗框（和窗）後面（ISMoveableSpriteProps.lua:2141-2170,2196-2210）；全高窗同樣插在同形狀的
+    -- 牆飾或門框牆（tallFrame）後面。牆型窗沒有窗框，和牆一樣插在最後一個地板後面（地圖照讀檔順序，CellLoader.java:128-137）
+    for i = 0, objects:size() - 1 do
+        local p = objects:get(i):getProperties()
+        if p and (p:has(north and F.WindowN or F.WindowW) or (shape and p:has(cut) and p:get("WindowShape") == shape)) then
+            index = i + 1
+        end
+    end
+    if index < 0 and window then index = edgeIndex(sq, "wall", north) end
+    finish(sq, obj, index)
+end
+
+-- 照原版樓梯清掉這格的草、可移除的植物（地毯留著，buildRecipeCode.lua:225-342）
+local function clearGrass(sq)
+    local objects = sq:getObjects()
+    for i = objects:size() - 1, 0, -1 do
+        local o = objects:get(i)
+        local op = o:getProperties()
+        if op and (op:has(F.canBeRemoved) or (op:has(F.vegitation) and o:getType() ~= T.tree)) and not isRug(o, op) then
+            sq:transmitRemoveItemFromSquare(o, false)
+        end
+    end
+end
+
+-- 樓梯：照原版 BuildRecipeCode.stairs.OnCreate（buildRecipeCode.lua:225-342）。三片都是 IsoThumpable，buildMaterials 都寫
+-- 整組的（Cost.forCells 收在頂片那一格；原版拆哪一片都照那片退）；照原版清掉這格的草（地毯留著）。頂端上一層補平台
+-- 地板（addFloor 自己會同步，IsoGridSquare.java:4726-4776），記 ConnectedToStairs（同向的樓梯不能再蓋在平台上），
+-- 平台與頂片正上方那格重算。補地板前先照一般地板只拆這一格的舊東西：addFloor 自己拆用預設的 safelyRemove，
+-- 伺服器上多格的一組會整組拆（IsoGridSquare.java:4731-4750,5930-5957），動到沒驗證過的格子。
+local function placeStairs(cells, placed)
+    local set, west, top, landing = cells[1].cost, false, nil, nil
+    for _, c in ipairs(cells) do
+        if c.role == "platform" then
+            landing = c
+        else
+            west = Rules.westStairs(c.spr:getType())
+            clearGrass(c.sq)
+            local obj = thumpable({ sq = c.sq, spr = c.spr, cost = set }, "stairs", west)
+            obj:setIsStairs(true)
+            placed[#placed + 1] = obj
+            finish(c.sq, obj)
+            if c.role == "top" then top = c end
+        end
+    end
+    local sq = landing.sq
+    if not sq:has(F.solidfloor) then
+        Place.clearFloor(sq)
+        local floor = layFloor(sq, Entry.STAIR_FLOOR)
+        if not floor then error("stair landing not placed at " .. sq:getX() .. "," .. sq:getY()) end
+        placed[#placed + 1] = floor
+        -- 拆樓梯時只拆本 MOD 補的平台（Server.dismantle）：一般 IsoObject、和原版補的同一張圖，只能記在伺服器帳本
+        if MinidoracatBuilder.Ledger then MinidoracatBuilder.Ledger.put(floor, {}) end
+    end
+    sq:getModData()["ConnectedToStairs" .. tostring(not west)] = true
+    sq:RecalcAllWithNeighbours(true)
+    local above = Place.square(top.x, top.y, top.z + 1)
+    if above then above:RecalcAllWithNeighbours(true) end
+end
+
+-- 坡道：每片一個一般物件（引擎照格上物件的圖塊屬性算斜面，IsoThumpable 也是物件，但原版與探針都用一般物件，
+-- 見 builder-dev placement.md「坡道」），AddTileObject 放（不進特殊物件清單，IsoGridSquare.java:5846-5880），
+-- 記號＝頭片名（Place.ramp，只給右鍵選單看）放之前寫好，跟著整件物件送給玩家。照樓梯清掉這格的草。坡頂上一層沒有地板
+-- 時補平台（layFloor：引擎半途出錯的那片拿掉、整組失敗），記帳本（拆坡道時一起拆，Dismantle.plan）。整組的退料記成
+-- 伺服器帳本一筆，鍵是頭片那格加上頭片圖名（Ledger.rampKey、Place.refundOf）：這一筆是「這組是本 MOD 蓋的」唯一的憑據，記不進去就整組失敗
+-- （丟錯，Server.complete 照 Place.undo 收回、不扣料），不留一組本工具拆不掉的坡道
+local function placeRamp(cells, placed)
+    local head, items = cells[1], {}
+    for _, c in ipairs(cells) do
+        for ft, n in pairs(refundable(c.cost)) do items[ft] = (items[ft] or 0) + n end
+        local sq = c.sq
+        if c.role == "platform" then
+            if not sq:has(F.solidfloor) then
+                Place.clearFloor(sq)
+                local floor = layFloor(sq, c.spr:getName())
+                if not floor then error("ramp deck not placed at " .. sq:getX() .. "," .. sq:getY()) end
+                placed[#placed + 1] = floor
+                if MinidoracatBuilder.Ledger then MinidoracatBuilder.Ledger.put(floor, {}) end
+            end
+        else
+            clearGrass(sq)
+            local obj = IsoObject.new(getCell(), sq, c.spr)
+            obj:getModData().builderEntry = head.spr:getName()
+            placed[#placed + 1] = obj
+            sq:AddTileObject(obj)
+            obj:transmitCompleteItemToClients()
+        end
+        sq:RecalcAllWithNeighbours(true)
+    end
+    local Ledger = MinidoracatBuilder.Ledger
+    if not (Ledger and Ledger.putRamp(head.x, head.y, head.z, head.spr:getName(), items)) then
+        error("ramp ledger not recorded at " .. head.x .. "," .. head.y .. "," .. head.z)
+    end
+end
+
+-- 燈：照原版搬動放燈（ISMoveableSpriteProps.lua:2325-2329）一律建 IsoLightSwitch，多格的每片一個。有 lightR 的自己發光、
+-- 有電才亮（客戶端每片自己判斷）；沒有 lightR 的是開關，原版只控制地圖房間的燈（IsoLightSwitch.java:74-100），線路上的燈由
+-- 伺服器 Circuits 切（放好後 Server.complete 呼叫 Circuits.placed 自動接線）。
+-- 能不能換燈泡由建構子照 IsMoveAble 設。擋路的照原版設 movedThumpable，殭屍打得壞（:2501-2504）；沙盒「殭屍打不壞」打開時不設。
+-- IsoLightSwitch 沒有 buildMaterials：拆了退什麼記在伺服器帳本（server/MinidoracatBuilder/Ledger.lua）。
+local function newLight(c)
+    local sq, spr = c.sq, c.spr
+    local p = spr:getProperties()
+    local obj = IsoLightSwitch.new(getCell(), sq, spr, sq:getRoomID())
+    obj:addLightSourceFromSprite()
+    -- 燈蓋好就開（同原版搬燈，ISMoveableSpriteProps.lua:2329）。格子有房間時，開關（沒有 lightR）沿用建構子照房間設的狀態
+    -- （IsoLightSwitch.java:90-96）：強制開的話房間燈關著時開關顯示開、房間暗，第一次按看起來沒反應。有房間的是地圖房屋，
+    -- 單機的自建房屋也是（客戶端與伺服器同一份世界）；MP 伺服器上自建房屋沒有房間（IsoRegions.java:212-214），照樣開
+    if p:has("lightR") or not sq:getRoom() then obj:setActivated(true) end
+    if c.yoff and c.yoff ~= 0 then obj:setRenderYOffset(c.yoff) end
+    if (p:has(F.solid) or p:has(F.solidtrans)) and not proof("ZombieProof") then obj:setMovedThumpable(true) end
+    obj:getModData().builderEntry = spr:getName()
+    return obj
+end
+
+-- 家電（壁爐、爐子、烤肉架、洗衣機、烘衣機）：照地圖讀檔，依容器型別建原版類別（CellLoader.java:68-70,139-168,318-328；
+-- 那裡 camping_01_04..06 的 campfire 例外，目錄沒有這三張）。建成 IsoThumpable 的話原版認不得：生火選單只開給
+-- isFireInteractionObject（IsoFireplace、IsoBarbecue，IsoObject.java:6779-6781），爐子、洗衣機的功能也在各自的類別裡。
+-- 擋路的（solid／solidtrans）照原版搬家具放爐子、烤肉架、洗衣機、烘衣機設 movedThumpable（ISMoveableSpriteProps.lua:2246-2263,
+-- 2311-2313），殭屍打得壞，同 0.6.1 蓋成 IsoThumpable 時（審查 1109 Claude）；沙盒「殭屍打不壞」打開時不設，讀檔時 Place.harden
+-- 照當下的值改（同燈）。目錄的壁爐靠牆、不擋整格（collideN／W），原版搬家具也不設，照舊不打。沒有 buildMaterials：拆了退什麼記在伺服器帳本（同燈）。
+-- 0.6.1 以前蓋成 IsoThumpable 的照舊，拆掉重蓋才是新的（使用者 2026-11-09 裁定）。
+local APPLIANCE = {
+    fireplace = "IsoFireplace", woodstove = "IsoFireplace", brazier = "IsoFireplace", campfire = "IsoFireplace",
+    barbecue = "IsoBarbecue", barbecuepropane = "IsoBarbecue",
+    stove = "IsoStove", toaster = "IsoStove", coffeemaker = "IsoStove", microwave = "IsoStove",
+    clothingdryer = "IsoClothingDryer", clothingwasher = "IsoClothingWasher",
+}
+-- 這張圖照地圖會建成哪個家電類別（類別名稱），不是家電回 nil
+function Place.applianceOf(spr)
+    return APPLIANCE[spr:getProperties():get("container") or ""]
+end
+
+-- 沒有 buildMaterials 的本 MOD 物件（燈與開關、家電）：退料記在伺服器帳本，物件帶帳本編號（Ledger）。照 APPLIANCE 組，
+-- 加家電類別時兩邊不會漏一邊
+local KEYED = { "IsoLightSwitch" }
+do
+    local seen = {}
+    for _, cls in pairs(APPLIANCE) do
+        if not seen[cls] then
+            seen[cls] = true
+            KEYED[#KEYED + 1] = cls
+        end
+    end
+end
+function Place.keyed(obj)
+    for i = 1, #KEYED do
+        if instanceof(obj, KEYED[i]) then return true end
+    end
+    return false
+end
+
+-- 不是 IsoThumpable、有容器的本 MOD 物件（家電、原版放成一般物件的不擋路容器）：原版撿起只帶 movableData
+-- （ISMoveableSpriteProps.lua:1403-1404），放下照抄回去（:2423-2424），原版別處不讀它。記號放這裡，撿放幾次都認得出來補容量；
+-- 不放頂層（拆除照頂層記號認本 MOD 的）。表用合併，不蓋掉別的 MOD 的鍵。燈沒有容器，撿放後沒東西要補，不記。
+-- 回傳 true＝剛發了序號：物件已經送給客戶端的話，伺服器要 transmitModData。客戶端替容器改名時送回它那份完整的 modData，
+-- 伺服器整份換掉（ReceiveContainerModDataPacket.java:47-50）；客戶端那份沒有序號，伺服器的就被洗掉，下次撿放不記名字
+local function markMovable(obj, id)
+    if instanceof(obj, "IsoThumpable") or obj:getContainerCount() == 0 then return end
+    local md = obj:getModData()
+    local m = type(md.movableData) == "table" and md.movableData or {}
+    if m.builderEntry == id and (m.builderUid or isClient()) then return end
+    m.builderEntry = id
+    -- 序號：撿走時照它記下容器的名字（carried）。客戶端不發，等伺服器的
+    local fresh = not isClient() and not m.builderUid
+    if fresh then m.builderUid = string.format("%d-%d", ZombRand(1000000000), ZombRand(1000000000)) end
+    md.movableData = m
+    return fresh
+end
+-- 原版放下時，物品帶 movableData 就不抄它的其他鍵；容器的自訂名稱（<種類>_customContainerName，ItemContainer.java:3832-3840）
+-- 只在物件已有容器時補抄，而容器晚一步才建（ISMoveableSpriteProps.lua:2423-2447,2486）：帶記號的容器撿放會掉名字。
+-- 撿走時照序號記下名字（序號跟著 movableData 到新物件），放下時寫回（onAdded）。只在伺服器、單機做，客戶端等 transmitModData。
+-- shortcut: 名字只記在記憶體，東西還在玩家身上時伺服器重啟就掉名字；有人回報再改存 ModData
+local carried = {}
+local function stashNames(obj)
+    local m = obj:hasModData() and obj:getModData().movableData
+    local uid = type(m) == "table" and m.builderUid
+    if not uid then return end
+    local names
+    for i = 0, obj:getContainerCount() - 1 do
+        local c = obj:getContainerByIndex(i)
+        local name = c and c:getCustomName()
+        if name then
+            names = names or {}
+            names[c:getType() .. "_customContainerName"] = name
+        end
+    end
+    carried[uid] = names
+end
+-- 原版撿起再放下的本 MOD 物件的記號（頂層記號沒了的）：巢狀那份（不擋路的 IsoThumpable 第一次撿放，:2427-2436）或 movableData
+local function movedEntry(md)
+    local n, m = md.modData, md.movableData
+    return type(n) == "table" and n.builderEntry or type(m) == "table" and m.builderEntry or nil
+end
+
+-- 容器照地圖讀檔那樣在建好後補（CellLoader.java:341-342）：壁爐只在圖寫了 ContainerCapacity 時自己建（IsoFireplace.java:61-67），
+-- 壁爐、洗衣機、烘衣機的 addToWorld 不呼叫上一層，AddSpecialObject 不會替它們建（IsoClothingWasher.java:52-55）。已有容器時不重建
+local function newAppliance(c, cls)
+    local obj = _G[cls].new(getCell(), c.sq, c.spr)
+    obj:createContainersFromSpriteProperties()
+    if c.yoff and c.yoff ~= 0 then obj:setRenderYOffset(c.yoff) end -- 放在桌上的微波爐、咖啡機
+    local p = c.spr:getProperties()
+    if (p:has(F.solid) or p:has(F.solidtrans)) and not proof("ZombieProof") then obj:setMovedThumpable(true) end
+    obj:getModData().builderEntry = c.spr:getName()
+    markMovable(obj, c.spr:getName()) -- 原版撿起家電只帶 movableData（家電一律放成原版類別，:2246-2313）
+    return obj
+end
+
+-- ---------------------------------------------------------------- 掛上去的地面覆蓋與牆面疊圖（Rules.onFloor、Rules.onWall）
+-- 圖掛在那一件（Place.host：地板，或那條邊的牆）的附加圖上（地圖讀檔同一種，CellLoader.java:201-264），不建物件。
+-- transmitUpdatedSpriteToClients 把整串附加圖送給客戶端（IsoObject.java:4603-4634；客戶端照 sprite id 重掛、重畫那格，
+-- GameClient.java:1044-1084），跟著那一件存檔。那一件 modData 的 builderOverlays（{ [圖名] = true }）只決定右鍵選單列不列；
+-- 拆了退什麼只看伺服器的覆蓋帳本（server/MinidoracatBuilder/Overlays.lua）。那一件被移除（換地板、拆牆、打壞）時圖跟著
+-- 它走（地圖的也是），它是那格的地板或 Place.wallAt 那一件時帳本跟著清（Overlays.drop；原地換牆由 Server.complete 掛回新牆）。
+-- 不觸發移除事件的原版動作不清：鏟地、清除塗鴉與污垢只拿掉附加圖；火燒對一般物件只拿掉附加圖、IsoThumpable 直接換成新物件。
+-- 見 builder-dev placement.md「掛上去的地面覆蓋與牆面疊圖」。
+local LOG = "[MinidoracatBuilderFor42] "
+local function at(sq) return sq:getX() .. "," .. sq:getY() .. "," .. sq:getZ() end
+
+local function mark(host, name, on)
+    local md = host:getModData()
+    local own = type(md.builderOverlays) == "table" and md.builderOverlays or {}
+    own[name] = on or nil
+    local any = false
+    for _ in pairs(own) do
+        any = true
+        break
+    end
+    md.builderOverlays = any and own or nil
+end
+
+-- 把 spr 掛到 sq 上它該掛的那一件（Place.host），寫記號、同步、記帳本（items＝拆了退什麼）。拆回用的紀錄（Place.undo；
+-- attached 欄位分辨紀錄與物件）在掛上之前就記進 placed（給了的話），後面幾步出錯時照樣拆得回；也當回傳值。
+-- 沒有那一件、附加圖滿了丟錯（Place.check 已擋）。
+function Place.attach(sq, spr, items, ...)
+    local placed = ...
+    local host, edge = Place.host(sq, spr, nil) -- 後面的參數明寫：Kahlua 少傳的參數不保證是 nil
+    if not host then error("nothing to hang on at " .. at(sq)) end
+    if attachedCount(host) >= MAX_ATTACHED then error("overlays full at " .. at(sq)) end
+    local name = spr:getName()
+    local rec = { attached = true, host = host, name = name, edge = edge }
+    if placed then placed[#placed + 1] = rec end
+    host:addAttachedAnimSprite(spr)
+    mark(host, name, true)
+    host:transmitUpdatedSpriteToClients()
+    host:transmitModData()
+    local Overlays = MinidoracatBuilder.Overlays
+    if Overlays then Overlays.put(sq, name, items, edge) end
+    return rec
+end
+
+-- 拿掉 host 上最後一張叫 name 的附加圖與記號並同步，回有沒有拿掉。引擎丟的例外 Kahlua 只記 log、不往上丟
+-- （MethodCaller.java:34-43），所以照張數確認真的少了一張。帳本由呼叫端清（拆除要先讀退料再拿掉）
+function Place.detach(host, name)
+    local i = attachedAt(host, name)
+    if not i then return false end
+    local n = attachedCount(host)
+    host:RemoveAttachedAnim(i)
+    if attachedCount(host) ~= n - 1 then return false end
+    mark(host, name, false)
+    host:transmitUpdatedSpriteToClients()
+    host:transmitModData()
+    return true
+end
+
+-- 舊版蓋的地面覆蓋（0.2.0 以前）與牆面疊圖（42.22.2-0.8.0 以前）是獨立的 IsoThumpable：改掛到 Place.host，退料照它的
+-- buildMaterials 記進覆蓋帳本（只在伺服器、帳本建好之後；排隊見 Place.migrate）。當下逐項再確認：還在目前載入的那一格、
+-- 記號和圖一樣、現在的圖仍會掛上去、物件是舊版蓋時的樣子（伺服器建的時候設的欄位：不是地板、殭屍不打、可穿過，
+-- Place 的 thumpable）、那一件在（牆面疊圖那條邊沒有牆就留著）而且上面沒有同一張、附加圖還沒滿；不符合的照舊留著。
+-- 先掛圖再移除舊物件：移除失敗就拿掉剛掛的那張。回有沒有改
+function Place.relink(obj)
+    local sq, spr = obj:getSquare(), obj:getSprite()
+    if not (sq and spr and obj:hasModData() and obj:getModData().builderEntry == spr:getName()) then return false end
+    if getCell():getGridSquare(sq:getX(), sq:getY(), sq:getZ()) ~= sq or not sq:getObjects():contains(obj) then
+        return false
+    end
+    if obj:isFloor() or obj:isThumpable() or not obj:isCanPassThrough() then return false end
+    local host, edge = Place.host(sq, spr, nil)
+    local name = spr:getName()
+    if not host or attachedAt(host, name) or attachedCount(host) >= MAX_ATTACHED then return false end
+    local items, parts = {}, {}
+    for ft, v in pairs(obj:getBuildMaterials()) do
+        local n = math.floor(tonumber(v) or 0)
+        if n >= 1 then
+            items[ft] = n
+            parts[#parts + 1] = ft .. "x" .. n
+        end
+    end
+    local Overlays = MinidoracatBuilder.Overlays
+    if not (Overlays and Overlays.instance) or Overlays.get(sq, name, edge) then return false end
+
+    local attached, attachError = pcall(Place.attach, sq, spr, items, nil)
+    local failure
+    if not attached then
+        failure = tostring(attachError)
+    elseif not attachedAt(host, name) or not Overlays.get(sq, name, edge) then
+        failure = "attachment or refund write did not complete"
+    else
+        local removed, removeError = pcall(function() sq:transmitRemoveItemFromSquare(obj, false) end)
+        if sq:getObjects():contains(obj) then
+            failure = removed and "old object was not removed" or tostring(removeError)
+        end
+    end
+    if failure then
+        local detached, result = pcall(Place.detach, host, name)
+        Overlays.forget(sq, name, edge)
+        if not detached or (not result and attachedAt(host, name)) then
+            failure = failure .. "; temporary attachment could not be removed"
+        end
+        error(failure .. " at " .. at(sq))
+    end
+    print(LOG .. "RELINK overlay e=" .. name .. " at=" .. at(sq) .. " refund=" .. table.concat(parts, ","))
+    return true
+end
+
+-- 區域資料（引擎算室內、房間圍合用的 IsoRegions）補推。引擎有兩份緩衝輪流當前台，格子的更新在背景執行緒成批套用；
+-- 排到那一批「套用」後面的格子只寫進一份（IsoRegionWorker.java:129-208 取空佇列就開批、:210-296 兩份各跑一輪），之後
+-- 每換一次緩衝，那一格就在有牆、沒牆之間跳，圍好的房子時而不算室內。實機 58,080 片牆漏 5 片，對那格重推 5 次都補回
+-- （builder-dev placement.md「區域資料補推」）。所以會改區域位元的種類（地板、格邊的牆與門窗、樓梯、坡道、水面）
+-- 放好或拆掉後，下一個 tick 照那一格當時的樣子再推一次：兩份已經一致時引擎不改資料。這是降低機率、不是保證：補推
+-- 自己也可能只寫進一份，兩次都遇上才會留下。存座標不存格子（格子物件會回收重用）。kind 給 nil＝不看種類
+-- （Place.undo、挖水、填平）。多人的客戶端呼叫到也沒事（squareChanged 在客戶端直接返回）
+do
+    local REGIONAL = { floor = true, stairs = true, ramp = true }
+    local pending, n = {}, 0
+    -- 這格的區域位元是不是 0：照 IsoRegions.calculateSquareFlags 的條件（IsoRegions.java:322-349；protected，Lua 叫不到）
+    local function bare(sq)
+        return not (sq:has(F.solidfloor) or sq:has(F.cutN) or sq:has(T.doorFrN) or sq:HasStairs()
+            or (not sq:has(F.WallSE) and (sq:has(F.cutW) or sq:has(T.doorFrW))))
+    end
+    local function flush()
+        Events.OnTick.Remove(flush)
+        local list, m, cell = pending, n, getCell()
+        pending, n = {}, 0
+        for i = 1, m, 3 do
+            local x, y, z = list[i], list[i + 1], list[i + 2]
+            local sq = cell:getGridSquare(x, y, z)
+            if sq then
+                -- 引擎只在位元和「之前」不同時才送：一般拿 0 當「之前」；位元本身是 0 的（上層沒地板的格子拆掉牆，或
+                -- 柱子讓引擎不算同格的西牆）改拿正下方地面那格（有地板，不是 0）。送完把「之前」設回 0
+                local ref = z > 0 and bare(sq) and cell:getGridSquare(x, y, 0) or nil
+                IsoRegions.setPreviousFlags(ref)
+                IsoRegions.squareChanged(sq)
+                IsoRegions.setPreviousFlags(nil)
+            end
+        end
+    end
+    function Place.repush(sq, kind)
+        if kind and not (Entry.EDGE[kind] or REGIONAL[kind]) then return end
+        if n == 0 then Events.OnTick.Add(flush) end
+        pending[n + 1], pending[n + 2], pending[n + 3] = sq:getX(), sq:getY(), sq:getZ()
+        n = n + 3
+    end
+end
+
+-- 這次放好的物件所在的格子補推區域資料。placed 裡的表：掛上去的疊圖不改區域位元，水面 Place.dig 自己排過了
+local function repushPlaced(kind, placed, first)
+    for i = first, #placed do
+        local o = placed[i]
+        local sq = not (type(o) == "table" and (o.attached == true or o.water)) and o:getSquare()
+        if sq then Place.repush(sq, kind) end
+    end
+end
+
+-- 依序放好 cells 的每一格（{ sq, spr, cost, yoff, role }）。物件一建好就記進 placed（之後出錯時拆回用；還沒加進格子的
+-- 拆回時會略過）。丟錯由呼叫端 pcall 接。
+function Place.build(kind, cells, placed)
+    local first = #placed + 1
+    if kind == "stairs" then
+        placeStairs(cells, placed)
+        return repushPlaced(kind, placed, first)
+    end
+    if kind == "ramp" then
+        placeRamp(cells, placed)
+        return repushPlaced(kind, placed, first)
+    end
+    for _, c in ipairs(cells) do
+        local sq, spr = c.sq, c.spr
+        local north = Entry.north(kind, spr)
+        local obj
+        if kind == "water" then
+            Place.dig(sq, spr, placed)
+        elseif kind == "door" then
+            obj = IsoDoor.new(getCell(), sq, spr:getName(), north)
+            -- 讀檔時認得出來（Place.harden）。單扇門拆除不認（Dismantle.mine）；車庫門、雙開門照第一片的記號認整組（Place.ourDoor）
+            obj:getModData().builderEntry = spr:getName()
+            if proof("ZombieProofDoors") then obj:setHealth(DOOR_HP) end
+            placed[#placed + 1] = obj
+            finish(sq, obj, edgeIndex(sq, kind, north))
+        elseif kind == "window" then
+            obj = IsoWindow.new(getCell(), sq, spr, north)
+            obj:setIsLocked(false)
+            placed[#placed + 1] = obj
+            placeWindow(sq, obj, north, true)
+        elseif kind == "light" then
+            obj = newLight(c)
+            placed[#placed + 1] = obj
+            finish(sq, obj)
+            if MinidoracatBuilder.Ledger then MinidoracatBuilder.Ledger.put(obj, refundable(c.cost)) end
+            -- 單機：伺服器這段和客戶端同一個程序，沒有 OnObjectAdded（那是多人客戶端收封包時發的），在這裡登記
+            if Place.onLoaded then Place.onLoaded(obj) end
+        elseif kind == "container" and Place.applianceOf(spr) then
+            obj = newAppliance(c, Place.applianceOf(spr))
+            placed[#placed + 1] = obj
+            finish(sq, obj)
+            if MinidoracatBuilder.Ledger then MinidoracatBuilder.Ledger.put(obj, refundable(c.cost)) end
+        elseif kind == "curtain" then
+            -- 照原版搬動放窗上物件（ISMoveableSpriteProps.lua:2195-2210）：north＝面向 N 或 S
+            local facing = spr:getProperties():get("Facing")
+            obj = IsoCurtain.new(getCell(), sq, spr:getName(), north)
+            obj:getModData().builderEntry = spr:getName()
+            placed[#placed + 1] = obj
+            if facing == "S" or facing == "E" then placeWindow(sq, obj, north) else finish(sq, obj) end
+        elseif Rules.onFloor(kind, spr) or Place.host(sq, spr, kind) then -- 牆面疊圖那條邊沒有牆時往下照舊建物件
+            Place.attach(sq, spr, refundable(c.cost), placed)
+        else
+            obj = thumpable(c, kind, north)
+            -- 屋頂不擋整格；AddSpecialObject 不會重算下面幾層「有屋頂」（客戶端收到 AddItemToMap 才算，
+            -- AddItemToMapPacket.java:69），伺服器自己算，存檔才對（bt-newkinds §5.2）
+            if kind == "roof" then obj:setBlockAllTheSquare(false) end
+            placed[#placed + 1] = obj
+            if kind == "floor" then
+                placeFloor(sq, obj)
+            else
+                finish(sq, obj, REINSERT[kind] and edgeIndex(sq, kind, north) or nil)
+            end
+            if kind == "roof" then getCell():checkHaveRoof(sq:getX(), sq:getY()) end
+            local Floors = MinidoracatBuilder.Floors
+            if Floors and kind == "floor" and sq:getZ() <= 0 and Cost.refund(kind, spr) == "builder" then
+                Floors.put(obj, refundable(c.cost))
+            end
+        end
+    end
+    -- 車庫門、雙開門（單扇門只有一格）：IsoDoor 沒有 buildMaterials，整組的退料記成伺服器帳本一筆，鍵是第一片（Place.refundOf）
+    local Ledger = MinidoracatBuilder.Ledger
+    if kind == "door" and #cells > 1 and Ledger then
+        local items = {}
+        for _, c in ipairs(cells) do
+            for ft, n in pairs(refundable(c.cost)) do items[ft] = (items[ft] or 0) + n end
+        end
+        Ledger.putDoor(placed[first], items)
+    end
+    repushPlaced(kind, placed, first)
+end
+
+-- 拆回這次已放的（放到一半出錯時）。多格的一組缺片時伺服器整組不拆（IsoObjectUtils.java:119-155），所以逐片拆。
+-- 不在格子上的物件 transmitRemoveItemFromSquare 直接回 -1。掛上去的（Place.attach 的紀錄）拿掉那張、清帳本。
+-- 挖好的水面（{ water }）換回原本的地面，不留一格沒有地板；出錯只記 log（呼叫端已經在收拾，不再往上丟）。
+-- 蓋地板時原本的地面已經拆掉（placeFloor 的 Place.clearFloor）：z ≤ 0 拆回後補泥土（同拆地板，Server.lua 的 removeAll）
+function Place.undo(placed)
+    for i = #placed, 1, -1 do
+        local obj = placed[i]
+        if type(obj) == "table" and obj.attached == true then
+            Place.detach(obj.host, obj.name)
+            local Overlays, sq = MinidoracatBuilder.Overlays, obj.host:getSquare()
+            if Overlays and sq then Overlays.forget(sq, obj.name, obj.edge) end
+        elseif type(obj) == "table" and obj.water then
+            if obj.water:getSquare() then
+                local ok, err = pcall(Place.fill, obj.water)
+                if not ok then print("[MinidoracatBuilderFor42] water undo failed: " .. tostring(err)) end
+            end
+        else
+            local sq = obj:getSquare()
+            if sq then
+                sq:transmitRemoveItemFromSquare(obj, false)
+                if sq:getZ() <= 0 and instanceof(obj, "IsoThumpable") and obj:isFloor() and not sq:getFloor() then
+                    Place.clearFloor(sq)
+                    layFloor(sq, Place.DIRT)
+                end
+                Place.repush(sq, nil)
+            end
+        end
+    end
+end
+
+-- 原版 Actions.build 的收尾（ActionManager.lua:29-31），不經過它就要自己做
+function Place.settle(cells)
+    for _, c in ipairs(cells) do
+        c.sq:RecalcAllWithNeighbours(true)
+        buildUtil.setHaveConstruction(c.sq, true)
+    end
+end
+
+local function clearDirtAt(D, c, n, w)
+    local x, y, z = c.sq:getX(), c.sq:getY(), c.sq:getZ()
+    if n and D.isOuterEdge(x, y, z, "N") then D.clearDirt(c.sq, "N") end
+    if w and D.isOuterEdge(x, y, z, "W") then D.clearDirt(c.sq, "W") end
+end
+
+-- 蓋好之後（Server.complete 在扣料前另包一層 pcall，丟錯和 Place.build 走同一段撤回）：照地下室 MOD 包原版 setInfo 那段（aparosa_BD_DirtLayer.lua:354-364），
+-- 這次蓋的格邊是它的外邊就拆掉那條邊的土牆（Place.check 只在外邊放行實牆）。之後本工具的牆被移除（拆除、蓋到一半出錯的
+-- Place.undo、原地替換拆舊的）時，它在移除事件記下、下一個 tick 那條邊沒有牆才補回土牆（:196-221），本工具不必管。
+-- 出錯丟回 Server.complete：照蓋到一半出錯撤回（Place.undo、不扣料、INTERNAL），拆了一半的土牆由它照上一句補回（審查 1107 Codex）。
+-- 這裡出錯不設 broken：只有伺服器跑得到這裡，設了客戶端不知道，兩端判斷就不一樣（審查 1107 Claude 第 2 輪）；INTERNAL 會清掉
+-- 客戶端排在後面的動作，不會每格再丟
+function Place.clearDirt(kind, cells)
+    if not Entry.EDGE[kind] then return end
+    for _, c in ipairs(cells) do
+        local D = dirtLayer(c.sq)
+        if D then
+            local n, w = bdEdges(c.spr, Entry.edges(kind, c.spr))
+            clearDirtAt(D, c, n, w)
+        end
+    end
+end
+
+-- 雙開門開關時，第 2、3 片從舊格移除、在斜對角那一格建一片耐久照預設的新物件（IsoDoor.java:141-148,2650-2745）。沙盒
+-- 「殭屍敲不破門」開著的話，下一個 tick（新的片建好之後）在舊格周圍一圈找本 MOD 的門、補回耐久。移除當下那一片的開關
+-- 狀態已經翻過、位置還在舊格，照它推第一片會找錯格（getDoubleDoorObject，:2785-2816），所以當下不認是誰的門，只記位置。
+-- 兩端各自做（同 Place.migrate）；補完就摘掉 tick
+do
+    local pending = {}
+    local function flush()
+        Events.OnTick.Remove(flush)
+        local list, cell = pending, getCell()
+        pending = {}
+        for _, p in ipairs(list) do
+            for x = p[1] - 1, p[1] + 1 do
+                for y = p[2] - 1, p[2] + 1 do
+                    local sq = cell:getGridSquare(x, y, p[3])
+                    local objects = sq and sq:getObjects()
+                    for i = 0, (objects and objects:size() or 0) - 1 do
+                        local o = objects:get(i)
+                        if instanceof(o, "IsoDoor") and Place.ourDoor(o) then Place.harden(o) end
+                    end
+                end
+            end
+        end
+    end
+    function Place.reharden(obj)
+        local sq = proof("ZombieProofDoors") and obj:getSquare()
+        if not sq then return end
+        if #pending == 0 then Events.OnTick.Add(flush) end
+        pending[#pending + 1] = { sq:getX(), sq:getY(), sq:getZ() }
+    end
+end
+
+-- 這一組坡道除了 obj 以外還有沒有片在格子上（照位置與圖名）；有格子沒載入時當成還有
+local function rampRest(obj, x, y, z, set)
+    local cell = getCell()
+    for i = 1, set.n do
+        local sq = cell:getGridSquare(x + (i - 1) * set.dx, y + (i - 1) * set.dy, z)
+        if not sq then return true end
+        local name, objects = set.parts[i]:getName(), sq:getObjects()
+        for j = 0, objects:size() - 1 do
+            local o = objects:get(j)
+            local s = o ~= obj and o:getSprite()
+            if s and s:getName() == name and not instanceof(o, "IsoThumpable") then return true end
+        end
+    end
+    return false
+end
+
+-- 移出世界前：
+--   掛著圖的那一件（地板、牆）：圖跟著消失，覆蓋帳本清掉那一件的（只在伺服器，Overlays.drop）。
+--   IsoThumpable：一樓以下的地板清掉這一格的地板帳本（不管是不是本 MOD 蓋的）；本 MOD 蓋的清掉退料表：
+--     原版拆解、打壞都先讀退料表再移除（ISMoveableSpriteProps.lua:4323-4357、ISBuildingObject.lua:51-69），已經移除的
+--     物件不該再退料。
+--   車庫門任何一片、雙開門第 1、4 片（拆、砸、殭屍打壞、原版拆解）：整組那一筆帳本清掉，剩下的片不再退料（只在伺服器）。
+--     雙開門第 2、3 片開關時會被移除再重建（IsoDoor.java:2650-2754），不算；重建的片耐久照預設，交給 Place.reharden。
+--   坡道任一片（照圖與位置認，不看記號；只在伺服器）：這一組還有別的片在（或有格子沒載入）時整組那一筆改成空表（作廢：
+--     剩下的片照樣拆得掉、不退料），最後一片移走時刪掉那一筆。地圖原有的坡道沒有那一筆，不動帳本。
+function Place.onAboutToBeRemoved(obj)
+    -- 地上的物品被撿走也會來（IsoGridSquare.java:5732-5738）：它不會是宿主，先擋掉，不替每件物品組帳本鍵
+    if instanceof(obj, "IsoWorldInventoryObject") then return end
+    if not isClient() then stashNames(obj) end -- 撿走帶記號的容器：記下名字，放下時寫回
+    local Overlays = MinidoracatBuilder.Overlays
+    if Overlays and instanceof(obj, "IsoObject") then Overlays.drop(obj) end
+    if instanceof(obj, "IsoDoor") then
+        local Ledger, i = MinidoracatBuilder.Ledger, IsoDoor.getDoubleDoorIndex(obj)
+        if i == 2 or i == 3 then return Place.reharden(obj) end
+        local a = Ledger and Place.doorAnchor(obj)
+        if a then Ledger.forgetDoor(a) end
+        return
+    end
+    local x, y, z, set = Place.rampOrigin(obj)
+    if x then
+        local Ledger, name = MinidoracatBuilder.Ledger, set.parts[1]:getName()
+        if not (Ledger and Ledger.getRamp(x, y, z, name)) then return end
+        if rampRest(obj, x, y, z, set) then Ledger.voidRamp(x, y, z, name) else Ledger.forgetRamp(x, y, z, name) end
+        return
+    end
+    if not instanceof(obj, "IsoThumpable") then
+        -- 本工具挖的水面（一般地板物件）：地板帳本那一筆記的就是這張圖才清。照帳本認，不看物件上的記號
+        local Floors = MinidoracatBuilder.Floors
+        if Floors and obj:isFloor() then
+            local e, spr = Floors.get(obj), obj:getSprite()
+            if e and spr and e.s == spr:getName() then Floors.forget(obj) end
+        end
+        return
+    end
+    local Floors, sq = MinidoracatBuilder.Floors, obj:getSquare()
+    if Floors and sq and sq:getZ() <= 0 and obj:isFloor() then Floors.forget(obj) end
+    if obj:hasModData() and obj:getModData().builderEntry then wipe(obj:getBuildMaterials()) end
+end
+
+-- 原版撿起再放下是建新物件：容量、殭屍打不壞回到原版值，照目前沙盒值補回（同讀檔的 migrate；兩個都冪等，本 MOD 自己蓋的、
+-- 多人客戶端收到的再走一次不變）。記號：實心家具由原版寫回頂層（ISMoveableSpriteProps.lua:1335-1349）；不擋路的（牆櫃、
+-- 桌上的）第一次只剩巢狀那份（:2427-2436），家電與之後再撿放的只剩 movableData（:1403-1404、:2423-2424；markMovable 補上），
+-- 只補容量、不提升成頂層（提升會讓拆除把原版放下的物件認成本 MOD 的）。
+-- 伺服器的事件在 transmitCompleteItemToClients 之後才發，封包帶舊容量；客戶端靠自己的這支補（AddItemToMapPacket.java:94）
+function Place.onAdded(obj)
+    if not (obj and obj:hasModData()) then return end
+    local md = obj:getModData()
+    if md.builderEntry then
+        local was = instanceof(obj, "IsoThumpable") and obj:isThumpable()
+        Place.harden(obj)
+        local sq = obj:getSquare()
+        -- 原版先 setIsThumpable(true) 再 AddSpecialObject，尋路當下就讀了位元（IsoGridSquare.java:5835-5837、
+        -- PolygonalMap2.java:1687-1692）；setIsThumpable 只改欄位（IsoThumpable.java:1697-1699），要再推一次
+        if was and sq and not obj:isThumpable() then sq:setSquareChanged() end
+    end
+    local id = md.builderEntry or movedEntry(md)
+    if not id then return end
+    -- 撿放過的家電：原版照擋路與否再設 movedThumpable（ISMoveableSpriteProps.lua:2246-2313,2501-2504），在 AddSpecialObject
+    -- 之前、尋路當下就讀到（SquareUpdateTask.java:345-348），改了要再推。只有家電（Place.keyed 照類別認）有 harden 的分支；
+    -- 原版放成一般物件的擋路家具（69 張）這版不修（主代理 2026-11-21 裁定）
+    if not md.builderEntry and Place.keyed(obj) then
+        local was = obj:isMovedThumpable()
+        Place.harden(obj)
+        local sq = obj:getSquare()
+        if sq and was ~= obj:isMovedThumpable() then sq:setSquareChanged() end
+    end
+    Place.fitContainers(obj)
+    local send = markMovable(obj, id)
+    local m = md.movableData
+    local names = type(m) == "table" and m.builderUid and carried[m.builderUid]
+    if names then -- 撿走時記下的容器名字（carried）
+        carried[m.builderUid] = nil
+        for k, v in pairs(names) do md[k] = v end
+        send = true
+    end
+    if send and isServer() then obj:transmitModData() end -- 物件封包已經送出（上面），序號與名字另外送
+end
+-- Chunk loads only enqueue work. The scan and repair queues share one tick deadline.
+local CHUNK_SIZE = 8 -- IsoChunk uses 8x8 tiles on Build 42.22.2.
+local MAX_JOBS_PER_TICK, MAX_SCAN_STEPS_PER_TICK, JOB_BUDGET_MS = 8, 256, 2
+local scanJobs = { first = 1, last = 0 }
+local scanByChunk = {}
+local drainChunkScans
+local floorJobs = { first = 1, last = 0 }
+local overlayJobs = { first = 1, last = 0 }
+local queued = {}
+local watchingJobs = false
+
+local function retryFloor(obj)
+    local id = obj:hasModData() and obj:getModData().builderEntry
+    local sq = obj:getSquare()
+    if id and sq and groundFloor(obj, sq) then migrateFloorRefund(obj, id, obj:getSprite()) end
+end
+
+local function drainJobs(queue, run, count, deadline)
+    while queue.first <= queue.last and count < MAX_JOBS_PER_TICK do
+        if count > 0 and getTimestampMs() >= deadline then break end
+        local job = queue[queue.first]
+        queue[queue.first] = nil
+        queue.first = queue.first + 1
+        queued[job.obj] = nil
+        count = count + 1
+        local sq = getCell():getGridSquare(job.x, job.y, job.z)
+        if sq and job.obj:getSquare() == sq and sq:getObjects():contains(job.obj) then
+            local ok, err = pcall(run, job.obj)
+            if not ok then print(LOG .. "legacy placement migration failed: " .. tostring(err)) end
+        end
+    end
+    if queue.first > queue.last then queue.first, queue.last = 1, 0 end
+    return count
+end
+
+local function migrationTick()
+    local deadline = getTimestampMs() + JOB_BUDGET_MS
+    local Floors, Overlays = MinidoracatBuilder.Floors, MinidoracatBuilder.Overlays
+    local count = 0
+    if Floors and Floors.instance then count = drainJobs(floorJobs, retryFloor, count, deadline) end
+    if Overlays and Overlays.instance then count = drainJobs(overlayJobs, Place.relink, count, deadline) end
+    if scanJobs.last > 0 then drainChunkScans(deadline, count > 0) end
+    if floorJobs.last == 0 and overlayJobs.last == 0 and scanJobs.last == 0 then
+        watchingJobs = false
+        Events.OnTick.Remove(migrationTick)
+    end
+end
+
+local function watchMigration()
+    if watchingJobs then return end
+    watchingJobs = true
+    Events.OnTick.Add(migrationTick)
+end
+
+local function queueMigration(queue, obj, sq)
+    if queued[obj] then return end
+    queued[obj] = true
+    queue.last = queue.last + 1
+    queue[queue.last] = { obj = obj, x = sq:getX(), y = sq:getY(), z = sq:getZ() }
+    watchMigration()
+end
+
+-- Cache the static tile classification, including negative results, across chunk loads.
+-- Actual migration eligibility still comes from the saved object and ledgers.
+local overlaySprites, cornerSprites = {}, {}
+local function hangs(spr)
+    local cached = overlaySprites[spr]
+    if cached ~= nil then return cached end
+    local p = spr:getProperties()
+    local result = false
+    if p:has(F.FloorOverlay) or p:has(F.WallOverlay) then
+        local kind = Rules.classify(spr)
+        result = Rules.onFloor(kind, spr) or Rules.onWall(kind, spr) ~= nil
+    end
+    overlaySprites[spr] = result
+    return result
+end
+
+local function isLegacyCornerSprite(spr)
+    local cached = cornerSprites[spr]
+    if cached ~= nil then return cached end
+    local result = false
+    if spr:getProperties():has(F.WallSE) then
+        local kind = Rules.classify(spr)
+        result = kind == nil or kind == "post"
+    end
+    cornerSprites[spr] = result
+    return result
+end
+
+-- 改之前可不可打：isThumpable() 在同一條邊有木板時一律回 true（IsoThumpable.java:1693-1695；isBarricaded 只比方向，
+-- :1615-1622），門框旁的門釘了木板也算，沒有讀原本欄位的方法。有木板時改照種類算（和建造時的 thumpable 同一份
+-- durability），分類不到的當作不打：記成可打的話，關掉時門框這類會變成殭屍要打的牆（getSpecialWall，IsoGridSquare.java:3794,3801）
+local function wasThumpable(obj)
+    if not obj:isBarricaded() then return obj:isThumpable() end
+    local spr = obj:getSprite()
+    local kind = spr and Rules.classify(spr)
+    return kind ~= nil and durability(kind, spr:getProperties()) ~= nil
+end
+
+-- 讀檔時照目前的沙盒值重設「殭屍打不壞」「殭屍敲不破門」（建造時已照當下的值設好）。只改和設定不一致的：兩個選項都關、
+-- 沒改過的物件什麼都不動
+function Place.harden(obj, settings)
+    settings = settings or Entry.settings()
+    if instanceof(obj, "IsoThumpable") then
+        local on = settings.ZombieProof == true
+        if on == (obj:getThumpDmg() >= PROOF_DMG - 3) then return end
+        if on then
+            obj:setThumpDmg(proofDmg(wasThumpable(obj), obj:getThumpDmg()))
+            obj:setIsThumpable(false)
+        else
+            local k = PROOF_DMG - obj:getThumpDmg()
+            obj:setIsThumpable(k % 2 == 1)
+            obj:setThumpDmg(k >= 2 and 1 or 8) -- 8＝IsoThumpable 的預設（IsoThumpable.java:106）
+        end
+        return true -- Thumpability changed. Refresh pathfinding after chunk registration.
+    elseif instanceof(obj, "IsoDoor") then
+        if settings.ZombieProofDoors == true then
+            if obj:getHealth() ~= DOOR_HP then obj:setHealth(DOOR_HP) end
+        elseif obj:getHealth() > obj:getMaxHealth() then
+            obj:setHealth(obj:getMaxHealth())
+        end
+    elseif Place.keyed(obj) then -- 燈、家電（擋路的打得壞，見 newLight、newAppliance）
+        local spr = obj:getSprite()
+        local p = spr and spr:getProperties()
+        if not p then return end
+        local want = (p:has(F.solid) or p:has(F.solidtrans)) and settings.ZombieProof ~= true
+        if obj:isMovedThumpable() ~= want then
+            obj:setMovedThumpable(want)
+            return true
+        end
+    end
+end
+
+-- 沙盒「容器容量倍率」（ContainerCapacityMultiplier）：圖塊寫的容量 × 倍率（四捨五入），最多 100：世界容器的 getCapacity 夾在
+-- 100（ItemContainer.java:170），伺服器搬東西照它檢查（TransactionManager.java:247-253,272-278），設更大也放不進去。原本的容量
+-- 照引擎建容器的算法（IsoObject.java:5272-5291；沒寫時一般 50、冷凍庫 15，ItemContainer.java:93）；認不出來的不動，本來就 ≥100 的
+-- 算出來也是 100，和 getCapacity 一樣，不動。容量隨存檔（ItemContainer.java:2487,2506）。建造時在送給玩家之前設，讀檔時兩端照目前的值重設
+function Place.fitContainers(obj, settings)
+    local n = obj:getContainerCount()
+    if n == 0 then return end
+    local spr = obj:getSprite()
+    local p = spr and spr:getProperties()
+    if not p then return end
+    -- 倍率照百分之一取整、再用整數算四捨五入：二進位存不準的倍率直接乘，會在 .5 邊界少一格（50×1.15、15×4.1；滑桿一格 0.1 也會碰到）
+    local m = math.floor((tonumber((settings or Entry.settings()).ContainerCapacityMultiplier) or 1) * 100 + 0.5)
+    for i = 0, n - 1 do
+        local c = obj:getContainerByIndex(i)
+        local base
+        if c and i == 0 and p:has(F.container) then
+            base = tonumber(p:get("ContainerCapacity")) or 50
+        elseif c and c:getType() == "freezer" then
+            base = tonumber(p:get("FreezerCapacity")) or 15
+        end
+        if base then
+            local want = math.min(100, math.floor((base * m + 50) / 100))
+            if c:getCapacity() ~= want then c:setCapacity(want) end
+        end
+    end
+end
+
+function Place.migrate(obj, settings, authoritative)
+    local md = obj:hasModData() and obj:getModData()
+    local id = md and md.builderEntry
+    if not id then
+        local moved = md and movedEntry(md)
+        local changed
+        if moved then
+            if Place.keyed(obj) then changed = Place.harden(obj, settings) end
+            Place.fitContainers(obj, settings)
+            if markMovable(obj, moved) and isServer() then obj:transmitModData() end
+        end
+        -- Double-door leaves rebuilt by the engine can lose their own marker.
+        if instanceof(obj, "IsoDoor") and Place.ourDoor(obj) then Place.harden(obj, settings) end
+        return changed
+    end
+
+    if Place.onLoaded then Place.onLoaded(obj) end
+    local changed = Place.harden(obj, settings)
+    Place.fitContainers(obj, settings)
+    if not instanceof(obj, "IsoThumpable") then
+        if markMovable(obj, id) and isServer() then obj:transmitModData() end
+        return changed
+    end
+
+    if obj:getName() == nil then obj:setName(id) end
+    local sq = obj:getSquare()
+    if not sq then return changed end
+    if authoritative == nil then authoritative = not isClient() end
+    local spr = obj:getSprite()
+    if groundFloor(obj, sq) then
+        if obj:isDismantable() then obj:setIsDismantable(false) end
+        if authoritative then
+            local Floors = MinidoracatBuilder.Floors
+            if Floors and Floors.instance then
+                migrateFloorRefund(obj, id, spr)
+            else
+                queueMigration(floorJobs, obj, sq)
+            end
+        end
+    elseif spr and authoritative and spr:getName() == id and hangs(spr) then
+        queueMigration(overlayJobs, obj, sq)
+    elseif spr and not obj:isCorner() and isLegacyCornerSprite(spr) then
+        obj:setCorner(true)
+        obj:setCanPassThrough(false)
+        return true, true
+    end
+    return changed
+end
+
+local CHUNK_AREA = CHUNK_SIZE * CHUNK_SIZE
+
+local function finishChunkScan(job)
+    scanByChunk[job.chunk] = nil
+    scanJobs[scanJobs.first] = nil
+    scanJobs.first = scanJobs.first + 1
+    if scanJobs.first > scanJobs.last then scanJobs.first, scanJobs.last = 1, 0 end
+end
+
+local function advanceScanSquare(job)
+    job.square, job.seen, job.index, job.size = nil, nil, 0, nil
+    job.tile = job.tile + 1
+    if job.tile == CHUNK_AREA then
+        job.tile, job.z = 0, job.z + 1
+    end
+    if job.z > job.maxZ then finishChunkScan(job) end
+end
+
+drainChunkScans = function(deadline, repaired)
+    local cell, settings, authoritative = getCell(), Entry.settings(), not isClient()
+    local steps = 0
+    while scanJobs.first <= scanJobs.last and steps < MAX_SCAN_STEPS_PER_TICK do
+        if (repaired or steps > 0) and getTimestampMs() >= deadline then break end
+        local job = scanJobs[scanJobs.first]
+        local sq = job.square
+        local resumed = sq ~= nil
+        steps = steps + 1 -- Count the square visit, including empty slots and revalidation.
+        if not sq then
+            local x, y = math.floor(job.tile / CHUNK_SIZE), job.tile % CHUNK_SIZE
+            sq = job.chunk:getGridSquare(x, y, job.z)
+            if sq then job.x, job.y = sq:getX(), sq:getY() end
+        end
+        if not sq then
+            advanceScanSquare(job)
+        elseif cell:getGridSquare(job.x, job.y, job.z) ~= sq then
+            -- The queued chunk left the world. A later LoadChunk creates a fresh cursor.
+            finishChunkScan(job)
+        else
+            job.square = sq
+            local objects = sq:getSpecialObjects()
+            local size = objects:size()
+            if job.size and job.size ~= size then job.index = 0 end
+            job.size = size
+            local changed, cornerChanged
+            while job.index < size and steps < MAX_SCAN_STEPS_PER_TICK do
+                -- On an otherwise idle tick, allow one resumed object visit so a slow
+                -- square lookup cannot leave the cursor stuck at the same object forever.
+                if (repaired or steps > 1 or not resumed) and getTimestampMs() >= deadline then break end
+                local obj = objects:get(job.index)
+                job.index = job.index + 1
+                steps = steps + 1
+                if obj and not (job.seen and job.seen[obj]) then
+                    if not job.seen then job.seen = {} end
+                    job.seen[obj] = true
+                    local ok, pathChanged, corner = pcall(Place.migrate, obj, settings, authoritative)
+                    if ok then
+                        changed = changed or pathChanged
+                        cornerChanged = cornerChanged or corner
+                    else
+                        print(LOG .. "chunk placement migration failed: " .. tostring(pathChanged))
+                    end
+                end
+            end
+            if cornerChanged then sq:RecalcAllWithNeighbours(true) end
+            if changed then sq:setSquareChanged() end
+            if job.index < size then break end
+            advanceScanSquare(job)
+        end
+    end
+end
+
+local function onLoadChunk(chunk)
+    local firstZ, maxZ = chunk:getMinLevel(), chunk:getMaxLevel()
+    if firstZ > maxZ then return end
+    local job = scanByChunk[chunk]
+    if not job then
+        job = { chunk = chunk }
+        scanByChunk[chunk] = job
+        scanJobs.last = scanJobs.last + 1
+        scanJobs[scanJobs.last] = job
+    end
+    -- IsoChunk instances can be reused. Each load restarts that instance's pending cursor.
+    job.tile, job.z, job.maxZ = 0, firstZ, maxZ
+    job.square, job.seen, job.index, job.size = nil, nil, 0, nil
+    watchMigration()
+end
+
+local function invalidateScanIndex(obj)
+    local job = scanJobs[scanJobs.first]
+    if job and job.square and obj:getSquare() == job.square then job.index = 0 end
+end
+
+Events.OnObjectAboutToBeRemoved.Add(function(obj)
+    invalidateScanIndex(obj)
+    MinidoracatBuilder.Place.onAboutToBeRemoved(obj)
+end)
+Events.OnObjectAdded.Add(function(obj)
+    if obj then invalidateScanIndex(obj) end
+    MinidoracatBuilder.Place.onAdded(obj)
+end)
+Events.LoadChunk.Add(onLoadChunk)
+
+return Place

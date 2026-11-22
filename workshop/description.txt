@@ -1,0 +1,25 @@
+[h1]ApocalipseBR LoadGridSquare Optimizations[/h1]
+
+Three independently enabled Build 42 patches that reduce Lua work as map chunks load.
+
+[h2]LiuDing Tiles[/h2]
+\common\media\lua\server\Items\LiuDing3DItem.lua Converts the [b]LiuDing_Tiles_3DItem_0[/b] map marker into a real sledgehammer. The converter runs when the marker loads, checks the surface height on that square, and places the item above furniture where applicable.
+
+Mod ID [b]ApocalipseBR_LiuDingTiles_fix[/b]. Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3736154771]LiuDing Tiles[/url] (mod ID [b]LiuDing_Tiles[/b]).
+
+[h2]True Swimming[/h2]
+\42\media\lua\shared\TrueSwimmingShared.lua Removes orphaned invisible pontoons that can be left behind by an interrupted session or arrive in a streamed multiplayer chunk. Cleanup runs when the [b]TrueSwimming_ponton[/b] sprite loads. True Water's shallow-water setup still uses its square-load handler because it checks water properties and neighboring squares.
+
+Mod ID [b]ApocalipseBR_TrueSwimming_fix[/b]. Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726]True Swimming by Harkwood[/url] (mod ID [b]TrueSwimming[/b]). The patch is based on True Swimming 1.9.
+
+[h2]MinidoracatBuilder[/h2]
+This mod is a companion patch for [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886]Minidoracat Build Anything for B42[/url] by Minidoracat. The \42\media\lua\shared\MinidoracatBuilder\Place.lua file in the mod used a Lua callback on each nonempty square as chunks streamed in. This patch replaces its placement module so the builder receives one [b]LoadChunk[/b] callback per chunk. That callback queues a cursor. On subsequent ticks the cursor visits squares and special objects, resumes inside dense squares, and skips work for unloaded chunks. It caches tile classifications across loads and uses saved object state and the original refund ledgers to tell which repairs are still needed. It adds no separate chunk migration data to the save.
+
+All queued chunks share up to 256 square and object visits per tick. Separate legacy overlay conversions and floor refunds waiting for the single-player ledger share up to eight jobs per tick. Both queues share a 2 ms time target checked between steps. Zombie protection, container capacity, legacy corner fixes, floor dismantle protection, and client light-switch registration take effect when the cursor reaches the object, so they can lag behind chunk loading during heavy streaming. An overlay stays in place if its host is missing or its attachment and refund entry cannot be confirmed. An eligible floor keeps its old materials until its refund is recorded, and the builder checks for a pending transfer before calculating a dismantle refund.
+
+Mod ID [b]minidoracatbuilderfix[/b]. Requires mod ID [b]MinidoracatBuilderFor42[/b]. The replacement is based on MinidoracatBuilder [b]42.22.2-1.1.1[/b] and requires game Build [b]42.22.2[/b] or later. Enable it alongside the original mod on the server and clients for multiplayer. Check compatibility after updating the original mod because this patch replaces its placement file.
+
+[h2]How the sprite-specific patches work[/h2]
+The old LiuDing Tiles and True Swimming handlers ran through [b]Events.LoadGridsquare[/b] and scanned objects in Lua on each loaded square. With [b]MapObjects.OnLoadWithSprite[/b], the engine matches the registered sprite name and passes that object directly to Lua. Ordinary squares skip both patched Lua handlers. When LoadGridSquare is used to find an specific object, this change has the potential to reduce millions of LoadGridSquare hook calls during a server runtime and coalesce into a single OnLoadWithSprite hook call. The engine still traverses square objects, and LiuDing still checks the surface when it finds a marker. The savings come from fewer Lua calls and fewer Lua-to-Java object lookups during chunk loading.
+
+MinidoracatBuilder uses Events.LoadChunk to reduce Java-to-Lua callbacks and a tick budget to spread the square and object scan across frames.

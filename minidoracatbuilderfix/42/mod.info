@@ -1,0 +1,7 @@
+id=minidoracatbuilderfix
+name=ApocalipseBR - MinidoracatBuilder Fix
+description=Moves MinidoracatBuilder's square-load migration to chunk loads and budgets legacy repairs.
+require=\MinidoracatBuilderFor42
+versionMin=42.22.2
+poster=poster.png
+icon=icon.png

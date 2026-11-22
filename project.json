@@ -1,0 +1,53 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Konijima/project-zomboid-studio/master/pzstudio.schema.json",
+    "title": "ApocalipseBR LoadGridSquare Optimizations",
+    "authors": [],
+    "workshop": {
+        "visibility": "public",
+        "tags": [
+            "Build 42",
+            "Multiplayer"
+        ],
+        "title": "ApocalipseBR LoadGridSquare Optimizations",
+        "excludes": []
+    },
+    "mods": {
+        "ApocalipseBR_LiuDingTiles_fix": {
+            "name": "ApocalipseBR - LiuDing Tiles Fix",
+            "description": "Converts LiuDing sledgehammer markers using a sprite-specific load callback.",
+            "require": "\\LiuDing_Tiles",
+            "poster": "poster.png",
+            "icon": "icon.png",
+            "build": {
+                "modInfo": "auto-if-missing"
+            }
+        },
+        "ApocalipseBR_TrueSwimming_fix": {
+            "name": "ApocalipseBR - True Swimming Fix",
+            "description": "Cleans up orphaned True Swimming pontoons using a sprite-specific load callback.",
+            "require": "\\TrueSwimming",
+            "versionMin": "42.0",
+            "poster": "poster.png",
+            "icon": "icon.png",
+            "build": {
+                "modInfo": "auto-if-missing"
+            }
+        },
+        "minidoracatbuilderfix": {
+            "name": "ApocalipseBR - MinidoracatBuilder Fix",
+            "description": "Moves MinidoracatBuilder's square-load migration to chunk loads and budgets legacy repairs.",
+            "require": "\\MinidoracatBuilderFor42",
+            "versionMin": "42.22.2",
+            "poster": "poster.png",
+            "icon": "icon.png",
+            "build": {
+                "modInfo": "auto-if-missing"
+            }
+        },
+        "apocalipsebr_basementdig_fix": {
+            "name": "ApocalipseBR_BasementDig_fix",
+            "description": ""
+        }
+    },
+    "excludes": []
+}
