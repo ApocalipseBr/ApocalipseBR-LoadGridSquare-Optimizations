@@ -16,6 +16,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Verify local Lua libraries are ignored
+        run: |
+          if [ -n "$(git ls-files -- .libraries)" ] || ! git check-ignore -q -- .libraries/; then
+            echo "::error::.libraries is for local Lua editor tooling and must be ignored by Git."
+            exit 1
+          fi
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
