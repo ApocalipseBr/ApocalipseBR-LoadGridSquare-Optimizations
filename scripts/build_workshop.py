@@ -4,9 +4,11 @@ import json
 import os
 import shutil
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from scripts.steamcmd import bundled_steamcmd
 from scripts.true_swimming import COMPANION, OUTPUT_PATH
 from tests.compatibility import BASELINES, ROOT, check, download, generate_true_swimming, mod_info
 
@@ -14,6 +16,25 @@ from tests.compatibility import BASELINES, ROOT, check, download, generate_true_
 def configured_output():
     setting = Path.home() / ".pzstudio"
     return Path(setting.read_text(encoding="utf-8").strip()) if setting.is_file() else Path.home() / "Zomboid/Workshop"
+
+
+def preserve_workshop_id(package, destination):
+    previous = destination / "workshop.txt"
+    if not previous.is_file():
+        return
+    published_ids = [
+        line for line in previous.read_text(encoding="utf-8-sig").splitlines()
+        if line.startswith("id=") and line[3:].isascii() and line[3:].isdigit()
+    ]
+    if not published_ids:
+        return
+    if len(published_ids) != 1:
+        raise ValueError(f"Multiple published Workshop IDs in {previous}")
+    metadata = package / "workshop.txt"
+    lines = metadata.read_text(encoding="utf-8").splitlines(keepends=True)
+    if not any(line.startswith("id=") for line in lines):
+        lines.insert(1, published_ids[0] + "\n")
+        metadata.write_text("".join(lines), encoding="utf-8", newline="\n")
 
 
 def promote(package, destination):
@@ -36,6 +57,7 @@ def promote(package, destination):
         if destination.exists():
             if not destination.is_dir():
                 raise ValueError(f"Expected a Workshop package directory at {destination}")
+            preserve_workshop_id(package, destination)
             destination.rename(backup)
         try:
             package.rename(destination)
@@ -105,17 +127,17 @@ def main():
     other_mods = [name for name in BASELINES["mods"] if name != COMPANION]
     try:
         workshop = args.workshop_root
-        if not workshop:
-            steamcmd = args.steamcmd or os.environ.get("STEAMCMD") or shutil.which("steamcmd")
-            if not steamcmd:
-                parser.error("Set STEAMCMD, pass --steamcmd, or use --workshop-root with an existing cache")
-            ids = None if args.check_upstream else [spec["workshop_id"]]
-            workshop = download(Path(steamcmd), ids=ids)
-        generated = generate_true_swimming(workshop.resolve(), reviewed=args.reviewed)
-        if args.check_upstream:
-            errors = check(workshop, reviewed=args.reviewed, companions=other_mods)
-            if errors:
-                raise ValueError("\n".join(errors))
+        steamcmd = args.steamcmd or os.environ.get("STEAMCMD") or shutil.which("steamcmd")
+        provision = bundled_steamcmd() if not workshop and not steamcmd else nullcontext(steamcmd)
+        with provision as executable:
+            if workshop is None:
+                ids = None if args.check_upstream else [spec["workshop_id"]]
+                workshop = download(Path(executable), ids=ids)
+            generated = generate_true_swimming(workshop.resolve(), reviewed=args.reviewed)
+            if args.check_upstream:
+                errors = check(workshop, reviewed=args.reviewed, companions=other_mods)
+                if errors:
+                    raise ValueError("\n".join(errors))
         destination = build_package(generated, (args.output or configured_output()).resolve())
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"Workshop build failed: {error}")

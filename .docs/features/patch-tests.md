@@ -6,17 +6,17 @@ Run these commands from the repository root with Python 3.12 and Node.js. On Win
 npm ci --ignore-scripts
 python -m pip install -r tests/requirements.txt
 python -B -m unittest discover -s tests -v
-npm run build -- --steamcmd C:/tools/steamcmd/steamcmd.exe
+npm run build
 python -B tests/compatibility.py --steamcmd C:/tools/steamcmd/steamcmd.exe
 ```
 
-Use a standalone SteamCMD installation. Set `STEAMCMD` to the executable path to reuse it for future builds, or put `steamcmd` on PATH. The build downloads True Swimming anonymously. Add `--check-upstream` to download and check all four Workshop items before packaging. The standalone compatibility command checks all four and exits with code 2 for a download failure or code 1 for a compatibility failure. Both commands accept `--workshop-root <path>` to use an existing `steamapps/workshop/content/108600` cache. Add `--reviewed` with that option to use the recorded reviewed IDs, including the local True Swimming 1.9 copy.
+Plain `npm run build` finds SteamCMD on PATH or uses the executable set by `STEAMCMD`. On Windows, when neither is configured, the build downloads Valve's SteamCMD into `%LOCALAPPDATA%/ApocalipseBR/LoadGridSquare/steamcmd` and reuses it on subsequent builds. Pass `--steamcmd <path>` to select a specific installation. The build downloads True Swimming anonymously. Add `--check-upstream` to download and check all four Workshop items before packaging. The standalone compatibility command checks all four and exits with code 2 for a download failure or code 1 for a compatibility failure. Both commands accept `--workshop-root <path>` to use an existing `steamapps/workshop/content/108600` cache. Add `--reviewed` with that option to use the recorded reviewed IDs, including the local True Swimming 1.9 copy.
 
 ## Generated True Swimming override
 
 Edit [the before and after snippets](../../patches/true-swimming/) when the callback changes. The generator requires exactly one matching registration and preserves every byte outside that block. Whole-file hash changes are logged. The build checks the generated Lua for the sprite registration, orphan cleanup, retained shallow-water and save hooks, and the upstream dock fix. Reviewed 1.9 runs the orphan checks because the dock behavior was added in 1.11.
 
-PZ Studio stages the output using the same build configuration as the other companions. The build verifies that the package contains the tested bytes and the expected dependency metadata before replacing the configured output. Use `--output <directory>` for a separate build destination. `npm run watch` generates the package first and continues watching authored mod files. Rerun the build after editing a patch snippet or refreshing Workshop inputs.
+PZ Studio stages the output using the same build configuration as the other companions. The build verifies that the package contains the tested bytes and the expected dependency metadata before replacing the configured output. It preserves a published item ID from the previous `workshop.txt` when the project's Workshop configuration leaves the ID unset. Use `--output <directory>` for a separate build destination. `npm run watch` generates the package first and continues watching authored mod files. Rerun the build after editing a patch snippet or refreshing Workshop inputs.
 
 ## Adding a regression test
 

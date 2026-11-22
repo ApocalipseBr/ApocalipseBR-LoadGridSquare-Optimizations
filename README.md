@@ -37,15 +37,15 @@ LiuDing Tiles, MinidoracatBuilder, and Basement Building ship checked-in Lua rep
 
 ## Build and regenerate
 
-Use Node.js with npm, Python 3.12, and a standalone SteamCMD installation. Run the following from the repository root. Replace the example SteamCMD path with your own.
+Use Node.js with npm and Python 3.12. Run the following from the repository root. On Windows, the build can install its own SteamCMD on the first run.
 
 ```powershell
 npm ci --ignore-scripts
 py -3 -m pip install -r tests/requirements.txt
-npm run build -- --steamcmd C:/tools/steamcmd/steamcmd.exe
+npm run build
 ```
 
-The command downloads True Swimming anonymously, regenerates the override, runs its tests, and packages all four companions in the configured PZ Studio output directory. Use `--output <directory>` for a separate destination, `--check-upstream` to check all four items before packaging, or `--workshop-root <path>` to build from an existing Workshop cache. [Build and test options](.docs/features/patch-tests.md)
+The command downloads True Swimming anonymously, regenerates the override, runs its tests, and packages all four companions in the configured PZ Studio output directory. The default is `%USERPROFILE%/Zomboid/Workshop` on Windows. If the existing package has a published item ID in `workshop.txt`, a rebuild keeps it unless `project.json` supplies a different ID. Use `--output <directory>` for a separate destination, `--check-upstream` to check all four items before packaging, or `--workshop-root <path>` to build from an existing Workshop cache. [Build and test options](.docs/features/patch-tests.md)
 
 Run the build again after an upstream update. GitHub Actions also checks the latest Workshop downloads daily and on demand, and attaches a tested package on success. Use that package for a staging server or a Workshop upload. [Workshop workflow](.github/workflows/workshop-compatibility.yml)
 
