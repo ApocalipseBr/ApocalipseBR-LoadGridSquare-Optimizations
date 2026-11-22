@@ -1,44 +1,38 @@
 [h1]ApocalipseBR LoadGridSquare Optimizations[/h1]
 
-Four independently enabled Build 42 companions that reduce Lua work as map chunks load.
+Four optional fixes for Build 42 that reduce the work these mods do as new parts of the map load. They’re aimed at reducing server stutters while players travel or explore. You can enable just the fixes for the mods you use.
 
-[h2]Requirements and setup[/h2]
+[h2]What each fix changes[/h2]
+
+[b]LiuDing Tiles[/b]
+[b]Before[/b] The mod searched each newly loaded square for decorative sledgehammers to turn into items you could pick up.
+[b]Now[/b] The conversion runs when one of those sledgehammers actually loads. The item is placed at the right height before the server sends it to players, so it can sit on the furniture where it belongs.
+Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3736154771]LiuDing Tiles[/url] ([b]LiuDing_Tiles[/b]). Enable [b]ApocalipseBR_LiuDingTiles_fix[/b].
+
+[b]True Swimming[/b]
+[b]Before[/b] The mod searched newly loaded squares for leftover invisible platforms it uses to let you swim. These can be left behind after an interrupted session or arrive with a newly loaded area in multiplayer.
+[b]Now[/b] The mod removes a leftover platform when it loads. Swimming and walking in shallow water work as before. The patch also keeps True Swimming 1.11’s fix for sinking while walking on docks with True Water.
+Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726]True Swimming by Harkwood[/url] ([b]TrueSwimming[/b]) and Build 42.20 or later. Enable [b]ApocalipseBR_TrueSwimming_fix[/b].
+
+[b]Minidoracat Build Anything[/b]
+[b]Before[/b] Loading a new area could make the game check older player-built objects for repairs all at once, even when there was little to fix.
+[b]Now[/b] Those checks are spread out as you play. The game remembers which areas have already been checked, so it can skip empty areas and go straight to known objects. Some repairs may finish shortly after you arrive. If you need to check your builds again, use [b]Reset Builder Migration Cache[/b] in the right-click menu in single-player or as a server admin.
+Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886]Minidoracat Build Anything for B42[/url] ([b]MinidoracatBuilderFor42[/b]), its dependencies, and Build 42.22.2 or later. Enable [b]minidoracatbuilderfix[/b].
+
+[b]Basement Building[/b]
+[b]Before[/b] The mod searched newly loaded squares for basement ladders and records needed to restore missing basement rooms. Those checks ran even in areas with no basements.
+[b]Now[/b] Ladder checks start when the game loads a matching ladder. Room recovery searches underground areas. If a repair needs a nearby area that hasn’t loaded yet, it can resume when that area loads.
+Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3806513504]Basement Building by APAROSA[/url] ([b]aparosa_BasementDig[/b]) and Build 42.20.0 or later. Enable [b]apocalipsebr_basementdig_fix[/b].
+
+[h2]How to install[/h2]
 [list]
-[*]Subscribe to this bundle and the original Workshop item for each fix you want. Enable the original mod and its companion together. The companion declares the original as a dependency and loads its replacement Lua at the same path.
-[*]On a dedicated server, add this bundle and the selected originals to WorkshopItems and enable the matching original and companion mod IDs in Mods. Use the same enabled mod set on the server and connecting clients.
-[*]Check the dedicated server log for [b]startup OK[/b] from each enabled companion. These messages report hook registration and initialization with debug mode off.
-[*]Use a Build 42 version supported by the original mod and its companion. The full bundle targets Build 42.22.2 or later. Check the requirements below if enabling only some fixes.
+[*]Subscribe to this bundle and the original Workshop mods for the fixes you want. Enable each companion alongside its original mod. The fixes apply automatically.
+[*]For a dedicated server, add the Workshop items to WorkshopItems and the corresponding mod IDs to Mods. Use the same enabled mods on the server and connecting clients.
+[*]Use Build 42.22.2 or later for all four fixes together. Check the original mod’s requirements if you only use part of the bundle.
+[*]Server admins can look for [b]startup OK[/b] in the server log to confirm each enabled patch initialized. Debug mode can stay off.
 [/list]
-
-[h2]LiuDing Tiles[/h2]
-Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3736154771]LiuDing Tiles[/url] (mod ID [b]LiuDing_Tiles[/b]). Enable companion [b]ApocalipseBR_LiuDingTiles_fix[/b]. The server replaces the [b]LiuDing_Tiles_3DItem_0[/b] marker with one pickable sledgehammer. It checks the surface on the marker square and places the item at its final height before syncing it.
-
-[h2]True Swimming[/h2]
-Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726]True Swimming by Harkwood[/url] (mod ID [b]TrueSwimming[/b]). The upstream listing specifies Build 42.20 or later. Enable companion [b]ApocalipseBR_TrueSwimming_fix[/b]. The sprite callback removes orphaned [b]TrueSwimming_ponton[/b] objects. The shallow-water square callback and save cleanup remain active. The build was verified against True Swimming 1.11 and retains its dock fix when using True Water.
-
-[h2]MinidoracatBuilder[/h2]
-Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886]Minidoracat Build Anything for B42[/url] (mod ID [b]MinidoracatBuilderFor42[/b]), its declared dependencies, and Build [b]42.22.2[/b] or later. Enable companion [b]minidoracatbuilderfix[/b]. The override is based on [b]42.22.2-1.1.1[/b].
-
-One [b]LoadChunk[/b] callback queues migration. Across all chunks, the tick worker allows up to 256 scan steps and eight deferred repair jobs, with a shared 2 ms time target checked between steps. The server or single-player save uses a verified chunk index to skip empty chunks or revisit known candidate squares. Multiplayer clients keep bounded discovery. Migration can finish after the chunk loads.
-
-In single-player or as a server admin, right-click the world and select [b]Reset Builder Migration Cache[/b] to clear the index and requeue observed chunks. Floor and overlay refund records are kept.
-
-[h2]Basement Building[/h2]
-Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3806513504]Basement Building by APAROSA[/url] (mod ID [b]aparosa_BasementDig[/b]) and Build [b]42.20.0[/b] or later. Enable companion [b]apocalipsebr_basementdig_fix[/b]. The override is based on [b]1.6.13[/b].
-
-Ladder discovery registers one callback for four sprites and defers up to eight ladder repairs per tick in authoritative worlds. The existing chunk callback collects underground room records and wakes repairs waiting for a neighboring chunk. Surface-only chunks skip the record scan. The original synchronization module publishes recovered rooms to clients.
-
-[h2]Patch architecture[/h2]
-LiuDing Tiles, MinidoracatBuilder, and Basement Building ship checked-in replacements for their targeted Lua files. Compare those files with upstream when updating the original mods.
-
-For True Swimming, the build downloads the original Workshop source and replaces exactly one orphan-pontoon callback. All other bytes in the file are preserved. Regression tests run on the generated Lua before the full file is packaged. The build stops for review if the callback changes or the tests fail. The published companion contains the generated file and still requires the original mod.
 
 [h2]For mod authors[/h2]
-[list]
-[*]If your square-load callback only looks for an object with a known sprite, register [b]MapObjects.OnLoadWithSprite[/b] and work on the object it passes to Lua. Remove the original registration for that task and keep callbacks that need square or neighbor data.
-[*]For True Swimming, replace the anonymous orphan-pontoon [b]Events.LoadGridsquare[/b] registration in the shared file with the linked replacement. Keep sprite setup, shallow-water handling, and save cleanup. Test streamed chunks and dock walking with True Water on the server and a connecting client. Once the upstream release includes the same cleanup, users on that release can disable the True Swimming companion.
-[*]For Builder and Basement Building, use the linked source reference to inspect the chunk and tick callbacks. Test saved worlds and delayed repairs, including cases where a neighboring chunk arrives later.
-[*]To rebuild this bundle, use Node.js with npm and Python 3.12. Follow the README setup and run npm run build. On Windows, the build can install SteamCMD automatically and writes the package to the configured Workshop folder. The daily GitHub workflow also produces a tested package artifact.
-[/list]
+Installing this bundle gives you the finished replacement Lua files for the affected parts of the original mods, including the generated True Swimming file. The companions use those files as soon as you enable them. If you maintain an original mod, you can use the included files to review and merge the relevant changes into your own version.
 
-[url=https://github.com/rbm4/ApocalipseBR_LiuDingTiles_fix#build-and-regenerate]Build instructions[/url] | [url=https://github.com/rbm4/ApocalipseBR_LiuDingTiles_fix/blob/master/patches/true-swimming/orphan-pontoon.after.lua]True Swimming replacement[/url] | [url=https://github.com/rbm4/ApocalipseBR_LiuDingTiles_fix/blob/master/.docs/features/map-load-compatibility-patches.md]Source and event reference[/url]
+For file paths, how the patches are built and tested, and instructions for adapting them to a newer release, read [b]README.md[/b] in the GitHub repository linked in the Workshop comments.
