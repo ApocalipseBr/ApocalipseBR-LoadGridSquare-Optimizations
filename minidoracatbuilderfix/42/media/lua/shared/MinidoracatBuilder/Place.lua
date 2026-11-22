@@ -8,6 +8,8 @@ require "MinidoracatBuilder/Entry"
 require "MinidoracatBuilder/Cost"
 
 local Entry, Rules, Cost = MinidoracatBuilder.Entry, MinidoracatBuilder.Rules, MinidoracatBuilder.Cost
+local Cache = require "MinidoracatBuilderFix/MigrationCache"
+local invalidateChunkCache
 local Place = MinidoracatBuilder.Place or {}
 MinidoracatBuilder.Place = Place
 
@@ -1046,6 +1048,7 @@ local function migrateFloorRefund(obj, id, spr)
         if entry and entry.s ~= name then return end
     end
     if obj:hasBuildMaterials() then wipe(obj:getBuildMaterials()) end
+    return true
 end
 
 function Place.refundOf(obj)
@@ -1650,6 +1653,7 @@ end
 -- 依序放好 cells 的每一格（{ sq, spr, cost, yoff, role }）。物件一建好就記進 placed（之後出錯時拆回用；還沒加進格子的
 -- 拆回時會略過）。丟錯由呼叫端 pcall 接。
 function Place.build(kind, cells, placed)
+    for _, c in ipairs(cells) do invalidateChunkCache(c.sq) end
     local first = #placed + 1
     if kind == "stairs" then
         placeStairs(cells, placed)
@@ -1917,12 +1921,14 @@ function Place.onAdded(obj)
     end
     if send and isServer() then obj:transmitModData() end -- 物件封包已經送出（上面），序號與名字另外送
 end
--- Chunk loads only enqueue work. The scan and repair queues share one tick deadline.
+-- Chunk loads check the index and enqueue work when needed. Both queues share one tick deadline.
 local CHUNK_SIZE = 8 -- IsoChunk uses 8x8 tiles on Build 42.22.2.
 local MAX_JOBS_PER_TICK, MAX_SCAN_STEPS_PER_TICK, JOB_BUDGET_MS = 8, 256, 2
 local scanJobs = { first = 1, last = 0 }
 local scanByChunk = {}
 local drainChunkScans
+local observedChunks, observedSlots = {}, {}
+local resetPosition, resetLast
 local floorJobs = { first = 1, last = 0 }
 local overlayJobs = { first = 1, last = 0 }
 local queued = {}
@@ -1958,8 +1964,8 @@ local function migrationTick()
     local count = 0
     if Floors and Floors.instance then count = drainJobs(floorJobs, retryFloor, count, deadline) end
     if Overlays and Overlays.instance then count = drainJobs(overlayJobs, Place.relink, count, deadline) end
-    if scanJobs.last > 0 then drainChunkScans(deadline, count > 0) end
-    if floorJobs.last == 0 and overlayJobs.last == 0 and scanJobs.last == 0 then
+    if scanJobs.last > 0 or resetPosition then drainChunkScans(deadline, count > 0) end
+    if floorJobs.last == 0 and overlayJobs.last == 0 and scanJobs.last == 0 and not resetPosition then
         watchingJobs = false
         Events.OnTick.Remove(migrationTick)
     end
@@ -2078,7 +2084,7 @@ function Place.fitContainers(obj, settings)
     end
 end
 
-function Place.migrate(obj, settings, authoritative)
+function Place.migrate(obj, settings, authoritative, runtimeOnly)
     local md = obj:hasModData() and obj:getModData()
     local id = md and md.builderEntry
     if not id then
@@ -2089,9 +2095,10 @@ function Place.migrate(obj, settings, authoritative)
             Place.fitContainers(obj, settings)
             if markMovable(obj, moved) and isServer() then obj:transmitModData() end
         end
-        -- Double-door leaves rebuilt by the engine can lose their own marker.
-        if instanceof(obj, "IsoDoor") and Place.ourDoor(obj) then Place.harden(obj, settings) end
-        return changed
+        -- An unmarked door may belong to a group whose marked anchor is in a neighboring chunk.
+        local door = instanceof(obj, "IsoDoor")
+        if door and Place.ourDoor(obj) then Place.harden(obj, settings) end
+        return changed, false, moved or door
     end
 
     if Place.onLoaded then Place.onLoaded(obj) end
@@ -2099,12 +2106,12 @@ function Place.migrate(obj, settings, authoritative)
     Place.fitContainers(obj, settings)
     if not instanceof(obj, "IsoThumpable") then
         if markMovable(obj, id) and isServer() then obj:transmitModData() end
-        return changed
+        return changed, false, true
     end
 
-    if obj:getName() == nil then obj:setName(id) end
+    if not runtimeOnly and obj:getName() == nil then obj:setName(id) end
     local sq = obj:getSquare()
-    if not sq then return changed end
+    if not sq then return changed, false, true end
     if authoritative == nil then authoritative = not isClient() end
     local spr = obj:getSprite()
     if groundFloor(obj, sq) then
@@ -2112,45 +2119,99 @@ function Place.migrate(obj, settings, authoritative)
         if authoritative then
             local Floors = MinidoracatBuilder.Floors
             if Floors and Floors.instance then
-                migrateFloorRefund(obj, id, spr)
-            else
-                queueMigration(floorJobs, obj, sq)
+                return changed, false, true, not migrateFloorRefund(obj, id, spr)
             end
+            queueMigration(floorJobs, obj, sq)
+            return changed, false, true, true
         end
-    elseif spr and authoritative and spr:getName() == id and hangs(spr) then
-        queueMigration(overlayJobs, obj, sq)
-    elseif spr and not obj:isCorner() and isLegacyCornerSprite(spr) then
-        obj:setCorner(true)
-        obj:setCanPassThrough(false)
-        return true, true
+    elseif not runtimeOnly then
+        if spr and authoritative and spr:getName() == id and hangs(spr) then
+            queueMigration(overlayJobs, obj, sq)
+            return changed, false, true, true
+        end
+        if spr and not obj:isCorner() and isLegacyCornerSprite(spr) then
+            obj:setCorner(true)
+            obj:setCanPassThrough(false)
+            return true, true, true
+        end
     end
-    return changed
+    return changed, false, true
 end
 
 local CHUNK_AREA = CHUNK_SIZE * CHUNK_SIZE
 
-local function finishChunkScan(job)
+local function finishChunkScan(job, completed)
+    if completed and job.targets and job.pending then
+        local anchor = Cache.anchor(job.chunk)
+        if anchor then Cache.invalidate(anchor) end
+    end
+    if completed and job.candidates and not job.pending and not job.invalidated and job.indexTable == Cache.index() then
+        local anchor = Cache.anchor(job.chunk)
+        if anchor and Cache.key(anchor) == job.key and getCell():getGridSquare(anchor:getX(), anchor:getY(), 0) == anchor then
+            Cache.complete(job.indexTable, anchor, job.firstZ, job.maxZ, job.candidates)
+        end
+    end
     scanByChunk[job.chunk] = nil
     scanJobs[scanJobs.first] = nil
     scanJobs.first = scanJobs.first + 1
     if scanJobs.first > scanJobs.last then scanJobs.first, scanJobs.last = 1, 0 end
 end
 
-local function advanceScanSquare(job)
+local function selectTarget(job, slot)
+    job.z, job.tile = math.floor(slot / CHUNK_AREA), slot % CHUNK_AREA
+end
+
+local function resetCursor(job, indexTable, targets)
+    job.indexTable, job.targets, job.targetPosition = indexTable, targets, 1
+    job.candidates = job.key and indexTable and not targets and {} or nil
     job.square, job.seen, job.index, job.size = nil, nil, 0, nil
-    job.tile = job.tile + 1
-    if job.tile == CHUNK_AREA then
-        job.tile, job.z = 0, job.z + 1
+    job.pending, job.invalidated, job.candidate = false, false, false
+    job.tile, job.z = 0, job.firstZ
+    if targets then selectTarget(job, targets[1]) end
+end
+
+local function advanceScanSquare(job)
+    if job.candidates and job.candidate then
+        job.candidates[#job.candidates + 1] = job.z * CHUNK_AREA + job.tile
     end
-    if job.z > job.maxZ then finishChunkScan(job) end
+    job.square, job.seen, job.index, job.size = nil, nil, 0, nil
+    job.candidate = false
+    if job.targets then
+        job.targetPosition = job.targetPosition + 1
+        local slot = job.targets[job.targetPosition]
+        if slot then selectTarget(job, slot) else finishChunkScan(job, true) end
+        return
+    end
+    job.tile = job.tile + 1
+    if job.tile == CHUNK_AREA then job.tile, job.z = 0, job.z + 1 end
+    if job.z > job.maxZ then finishChunkScan(job, true) end
+end
+
+local onLoadChunk
+
+local function enqueueResetChunk(cell)
+    local tracked = observedChunks[resetPosition]
+    resetPosition = resetPosition + 1
+    if resetPosition > resetLast then resetPosition = nil end
+    local anchor = cell:getGridSquare(tracked.x, tracked.y, 0)
+    if anchor and anchor:getChunk() == tracked.chunk then onLoadChunk(tracked.chunk) end
 end
 
 drainChunkScans = function(deadline, repaired)
     local cell, settings, authoritative = getCell(), Entry.settings(), not isClient()
     local steps = 0
+    while resetPosition and steps < MAX_SCAN_STEPS_PER_TICK do
+        if (repaired or steps > 0) and getTimestampMs() >= deadline then return end
+        enqueueResetChunk(cell)
+        steps = steps + 1
+    end
     while scanJobs.first <= scanJobs.last and steps < MAX_SCAN_STEPS_PER_TICK do
         if (repaired or steps > 0) and getTimestampMs() >= deadline then break end
         local job = scanJobs[scanJobs.first]
+        local indexTable = Cache.index()
+        if job.indexTable ~= indexTable or (job.targets and job.invalidated) then
+            resetCursor(job, indexTable, nil)
+        end
         local sq = job.square
         local resumed = sq ~= nil
         steps = steps + 1 -- Count the square visit, including empty slots and revalidation.
@@ -2160,7 +2221,13 @@ drainChunkScans = function(deadline, repaired)
             if sq then job.x, job.y = sq:getX(), sq:getY() end
         end
         if not sq then
-            advanceScanSquare(job)
+            if job.targets then
+                local anchor = Cache.anchor(job.chunk)
+                if anchor then Cache.invalidate(anchor) end
+                resetCursor(job, indexTable, nil)
+            else
+                advanceScanSquare(job)
+            end
         elseif cell:getGridSquare(job.x, job.y, job.z) ~= sq then
             -- The queued chunk left the world. A later LoadChunk creates a fresh cursor.
             finishChunkScan(job)
@@ -2181,11 +2248,14 @@ drainChunkScans = function(deadline, repaired)
                 if obj and not (job.seen and job.seen[obj]) then
                     if not job.seen then job.seen = {} end
                     job.seen[obj] = true
-                    local ok, pathChanged, corner = pcall(Place.migrate, obj, settings, authoritative)
+                    local ok, pathChanged, corner, candidate, pending = pcall(Place.migrate, obj, settings, authoritative, job.targets ~= nil)
                     if ok then
                         changed = changed or pathChanged
                         cornerChanged = cornerChanged or corner
+                        job.candidate = job.candidate or candidate
+                        job.pending = job.pending or pending
                     else
+                        job.pending = true
                         print(LOG .. "chunk placement migration failed: " .. tostring(pathChanged))
                     end
                 end
@@ -2198,10 +2268,27 @@ drainChunkScans = function(deadline, repaired)
     end
 end
 
-local function onLoadChunk(chunk)
+onLoadChunk = function(chunk)
     local firstZ, maxZ = chunk:getMinLevel(), chunk:getMaxLevel()
     if firstZ > maxZ then return end
+    local indexTable, anchor, coordinate, targets = Cache.index()
+    if not isClient() then
+        anchor = Cache.anchor(chunk)
+        if anchor then
+            coordinate = Cache.key(anchor)
+            local slot = observedSlots[chunk]
+            if not slot then
+                slot = #observedChunks + 1
+                observedSlots[chunk] = slot
+                observedChunks[slot] = { chunk = chunk }
+            end
+            local observed = observedChunks[slot]
+            observed.x, observed.y = anchor:getX(), anchor:getY()
+            targets = Cache.lookup(indexTable, anchor, firstZ, maxZ)
+        end
+    end
     local job = scanByChunk[chunk]
+    if targets and #targets == 0 and not job then return end
     if not job then
         job = { chunk = chunk }
         scanByChunk[chunk] = job
@@ -2209,22 +2296,62 @@ local function onLoadChunk(chunk)
         scanJobs[scanJobs.last] = job
     end
     -- IsoChunk instances can be reused. Each load restarts that instance's pending cursor.
-    job.tile, job.z, job.maxZ = 0, firstZ, maxZ
-    job.square, job.seen, job.index, job.size = nil, nil, 0, nil
+    job.firstZ, job.maxZ, job.key = firstZ, maxZ, coordinate
+    resetCursor(job, indexTable, targets and #targets > 0 and targets or nil)
     watchMigration()
 end
 
-local function invalidateScanIndex(obj)
-    local job = scanJobs[scanJobs.first]
-    if job and job.square and obj:getSquare() == job.square then job.index = 0 end
+invalidateChunkCache = function(square)
+    if not square then return end
+    if not isClient() then
+        Cache.invalidate(square)
+        local job = scanByChunk[square:getChunk()]
+        if job then job.invalidated = true end
+    end
+    local active = scanJobs[scanJobs.first]
+    if active and active.square == square then active.index = 0 end
+end
+
+local function objectChanged(obj)
+    if obj and not instanceof(obj, "IsoWorldInventoryObject") then invalidateChunkCache(obj:getSquare()) end
+end
+
+local function invalidateDoorDestination(obj)
+    if isClient() or not (instanceof(obj, "IsoDoor") or instanceof(obj, "IsoThumpable")) then return end
+    local sq = obj:getSquare()
+    if not sq then return end
+    local x, y = sq:getX(), sq:getY()
+    local minX, maxX = math.floor((x - 1) / CHUNK_SIZE), math.floor((x + 1) / CHUNK_SIZE)
+    local minY, maxY = math.floor((y - 1) / CHUNK_SIZE), math.floor((y + 1) / CHUNK_SIZE)
+    if minX == maxX and minY == maxY then return end
+    local leaf = IsoDoor.getDoubleDoorIndex(obj)
+    if leaf ~= 2 and leaf ~= 3 then return end
+    -- Native double doors can recreate a leaf on a neighboring square without OnObjectAdded.
+    local fromX, fromY = math.floor(x / CHUNK_SIZE), math.floor(y / CHUNK_SIZE)
+    local cell = getCell()
+    for cx = minX, maxX do
+        for cy = minY, maxY do
+            if cx ~= fromX or cy ~= fromY then
+                invalidateChunkCache(cell:getGridSquare(cx * CHUNK_SIZE, cy * CHUNK_SIZE, 0))
+            end
+        end
+    end
+end
+
+function Place.resetMigrationCache()
+    if not Cache.reset() then return end
+    if #observedChunks > 0 then resetPosition, resetLast = 1, #observedChunks end
+    if resetPosition or scanJobs.last > 0 then watchMigration() end
+    print(LOG .. "builder migration cache reset")
 end
 
 Events.OnObjectAboutToBeRemoved.Add(function(obj)
-    invalidateScanIndex(obj)
+    objectChanged(obj)
+    invalidateDoorDestination(obj)
     MinidoracatBuilder.Place.onAboutToBeRemoved(obj)
 end)
 Events.OnObjectAdded.Add(function(obj)
-    if obj then invalidateScanIndex(obj) end
+    objectChanged(obj)
     MinidoracatBuilder.Place.onAdded(obj)
 end)
 Events.LoadChunk.Add(onLoadChunk)
