@@ -1,0 +1,649 @@
+--- a/media/lua/shared/MinidoracatBuilder/Place.lua
++++ b/media/lua/shared/MinidoracatBuilder/Place.lua
+@@ -6,6 +6,8 @@
+ require "MinidoracatBuilder/Cost"
+ 
+ local Entry, Rules, Cost = MinidoracatBuilder.Entry, MinidoracatBuilder.Rules, MinidoracatBuilder.Cost
++local Cache = require "MinidoracatBuilderFix/MigrationCache"
++local invalidateChunkCache
+ local Place = MinidoracatBuilder.Place or {}
+ MinidoracatBuilder.Place = Place
+ 
+@@ -1042,6 +1044,31 @@
+ -- 不收料所以退空表。車庫門、雙開門照伺服器帳本那一組的一筆（Place.build；obj 是哪一片都行），坡道照頭片那格那一筆
+ -- （Place.rampOrigin 照圖與位置推頭片格，不看記號；某片被別的方式移走後那一筆是空表，見 Place.onAboutToBeRemoved）。
+ -- 都沒有回 nil。
++local function wipe(t)
++    local keys = {}
++    for k in pairs(t) do keys[#keys + 1] = k end
++    for i = 1, #keys do t[keys[i]] = nil end
++end
++
++-- The ledger and object can become ready at different times during single-player startup.
++-- Leave the old materials intact if an eligible transfer cannot be confirmed.
++local function migrateFloorRefund(obj, id, spr)
++    local Floors = MinidoracatBuilder.Floors
++    if not (Floors and Floors.instance) then return end
++    local name = spr and spr:getName()
++    if obj:isFloor() and name and name == id then
++        local entry = Floors.get(obj)
++        if not entry and Cost.refund("floor", spr) == "builder" then
++            Floors.put(obj, obj:getBuildMaterials())
++            entry = Floors.get(obj)
++            if not entry then return end
++        end
++        if entry and entry.s ~= name then return end
++    end
++    if obj:hasBuildMaterials() then wipe(obj:getBuildMaterials()) end
++    return true
++end
++
+ function Place.refundOf(obj)
+     local door = Place.doorAnchor(obj)
+     if door then
+@@ -1068,18 +1095,18 @@
+     if not (sq and sq:getZ() <= 0 and obj:isFloor()) then return obj:getBuildMaterials() end
+     local Floors = MinidoracatBuilder.Floors
+     local e = Floors and Floors.get(obj)
++    if not e and Floors and Floors.instance
++        and instanceof(obj, "IsoThumpable") and obj:hasModData() then
++        local id = obj:getModData().builderEntry
++        if id then migrateFloorRefund(obj, id, obj:getSprite()) end
++        e = Floors.get(obj)
++    end
+     if e then
+         local spr = obj:getSprite()
+         return spr and e.s == spr:getName() and not otherFloor(sq, obj) and e.i or nil
+     end
+-    if isServer() or not obj:hasBuildMaterials() then return nil end -- 專用伺服器讀格子前就建好帳本，都搬過了
++    if isServer() or not obj:hasBuildMaterials() then return nil end -- Dedicated servers require a valid ledger entry.
+     return obj:getBuildMaterials()
+-end
+-
+-local function wipe(t)
+-    local keys = {}
+-    for k in pairs(t) do keys[#keys + 1] = k end
+-    for i = 1, #keys do t[keys[i]] = nil end
+ end
+ 
+ -- 退料寫在伺服器建立的 Java 欄位 buildMaterials（原版拆解讀它），一樓以下的地板改記在地板帳本（groundFloor）；
+@@ -1569,13 +1596,28 @@
+             parts[#parts + 1] = ft .. "x" .. n
+         end
+     end
+-    Place.attach(sq, spr, items, nil)
+-    sq:transmitRemoveItemFromSquare(obj, false)
+-    if sq:getObjects():contains(obj) then
+-        Place.detach(host, name)
+-        local Overlays = MinidoracatBuilder.Overlays
+-        if Overlays then Overlays.forget(sq, name, edge) end
+-        error("not removed at " .. at(sq))
++    local Overlays = MinidoracatBuilder.Overlays
++    if not (Overlays and Overlays.instance) or Overlays.get(sq, name, edge) then return false end
++
++    local attached, attachError = pcall(Place.attach, sq, spr, items, nil)
++    local failure
++    if not attached then
++        failure = tostring(attachError)
++    elseif not attachedAt(host, name) or not Overlays.get(sq, name, edge) then
++        failure = "attachment or refund write did not complete"
++    else
++        local removed, removeError = pcall(function() sq:transmitRemoveItemFromSquare(obj, false) end)
++        if sq:getObjects():contains(obj) then
++            failure = removed and "old object was not removed" or tostring(removeError)
++        end
++    end
++    if failure then
++        local detached, result = pcall(Place.detach, host, name)
++        Overlays.forget(sq, name, edge)
++        if not detached or (not result and attachedAt(host, name)) then
++            failure = failure .. "; temporary attachment could not be removed"
++        end
++        error(failure .. " at " .. at(sq))
+     end
+     print(LOG .. "RELINK overlay e=" .. name .. " at=" .. at(sq) .. " refund=" .. table.concat(parts, ","))
+     return true
+@@ -1727,6 +1769,7 @@
+ -- 依序放好 cells 的每一格（{ sq, spr, cost, yoff, role }）。物件一建好就記進 placed（之後出錯時拆回用；還沒加進格子的
+ -- 拆回時會略過）。丟錯由呼叫端 pcall 接。
+ function Place.build(kind, cells, placed)
++    for _, c in ipairs(cells) do invalidateChunkCache(c.sq) end
+     local first = #placed + 1
+     if kind == "stairs" then
+         placeStairs(cells, placed)
+@@ -1955,7 +1998,6 @@
+     if Floors and sq and sq:getZ() <= 0 and obj:isFloor() then Floors.forget(obj) end
+     if obj:hasModData() and obj:getModData().builderEntry then wipe(obj:getBuildMaterials()) end
+ end
+-Events.OnObjectAboutToBeRemoved.Add(function(obj) MinidoracatBuilder.Place.onAboutToBeRemoved(obj) end)
+ 
+ -- 原版撿起再放下是建新物件：容量、殭屍打不壞回到原版值，照目前沙盒值補回（同讀檔的 migrate；兩個都冪等，本 MOD 自己蓋的、
+ -- 多人客戶端收到的再走一次不變）。記號：實心家具由原版寫回頂層（ISMoveableSpriteProps.lua:1335-1349）；不擋路的（牆櫃、
+@@ -1995,43 +2037,96 @@
+     end
+     if send and isServer() then obj:transmitModData() end -- 物件封包已經送出（上面），序號與名字另外送
+ end
+-Events.OnObjectAdded.Add(function(obj) MinidoracatBuilder.Place.onAdded(obj) end)
+-
+--- 讀檔時修舊版蓋的（每格載入一次，兩端都跑，重複跑結果一樣）：
+---   一樓以下的地板：不給原版搬動工具拆（兩端）；只在伺服器、帳本建好時清掉 buildMaterials，本工具會拆的、圖和蓋的時候
+---     一樣的先記進地板帳本（沒付料的記空表：照樣能拆、不退）。
+---     ponytail: 帳本還沒建好就不搬、buildMaterials 留著（單機讀檔先 IsoWorld.init 讀格子、之後才建 GOS，
+---     GameLoadingState.java:307,316；專用伺服器先建 GOS 再收連線，GameServer.java:827）。下次載入那格時再搬；要當場補再加排隊。
+---   牆角柱（WallSE）：當時歸在牆，放成可穿過、不是轉角，原生尋路會連同一格的牆一起當成打不了（thumpable 的柱子說明）。
+---     現在歸柱子或不列（BLOCKS_EDGE 這類）的照原版轉角柱改；現在歸柵欄這類的不動。
+---   地面覆蓋（0.2.0 以前）與牆面疊圖（42.22.2-0.8.0 以前）是獨立物件（Rules.onFloor、Rules.onWall）：只在伺服器排隊，
+---     帳本建好之後的下一個 tick 改掛（Place.relink；牆面疊圖那條邊沒有牆的照舊留著，之後那條邊有牆、再讀檔時才掛）。
+---     讀檔回呼裡不移除物件：這時正在列這一格的物件，單機的帳本也還沒建（同上）。
+---   本 MOD 蓋的（含門、燈）：「殭屍打不壞」「殭屍敲不破門」「容器容量倍率」照目前的沙盒值重設（Place.harden、
+---     Place.fitContainers）。LoadGridsquare 早於註冊原生尋路（IsoChunk.java:3834,3864），尋路吃得到改過的值。兩端各自照
+---     載入時的沙盒值算、不另外同步：多人中途改了選項，伺服器還載入著的那一帶照舊，送給客戶端的是記憶體裡的物件
+---     （PlayerDownloadServer.java:230-234），客戶端重新載入時卻照新值算，兩端不一致到伺服器也重新載入那一帶為止（重開服，或附近
+---     沒人、伺服器卸載那一格後再載入，ServerMap.java:563-586）。
+---     改了選項後要重新載入才套用（使用者 2026-11-01 選）。
+-local relinkQueue, relinking = {}, false
+-local function relinkTick()
+-    local Overlays = MinidoracatBuilder.Overlays
+-    if not (Overlays and Overlays.instance) then return end
+-    local list = relinkQueue
+-    relinkQueue, relinking = {}, false
+-    Events.OnTick.Remove(relinkTick)
+-    for _, obj in ipairs(list) do
+-        local ok, err = pcall(Place.relink, obj)
+-        if not ok then print(LOG .. "overlay relink failed: " .. tostring(err)) end
+-    end
+-end
+-
+--- 這張圖現在會掛上去（地面覆蓋或牆面疊圖）。先看旗標：讀檔時每個本 MOD 的 IsoThumpable 都問，多數不必分類
++-- Chunk loads check the index and enqueue work when needed. Both queues share one tick deadline.
++local CHUNK_SIZE = 8 -- IsoChunk uses 8x8 tiles on Build 42.22.2.
++local MAX_JOBS_PER_TICK, MAX_SCAN_STEPS_PER_TICK, JOB_BUDGET_MS = 8, 256, 2
++local scanJobs = { first = 1, last = 0 }
++local scanByChunk = {}
++local drainChunkScans
++local observedChunks, observedSlots = {}, {}
++local resetPosition, resetLast
++local floorJobs = { first = 1, last = 0 }
++local overlayJobs = { first = 1, last = 0 }
++local queued = {}
++local watchingJobs = false
++
++local function retryFloor(obj)
++    local id = obj:hasModData() and obj:getModData().builderEntry
++    local sq = obj:getSquare()
++    if id and sq and groundFloor(obj, sq) then migrateFloorRefund(obj, id, obj:getSprite()) end
++end
++
++local function drainJobs(queue, run, count, deadline)
++    while queue.first <= queue.last and count < MAX_JOBS_PER_TICK do
++        if count > 0 and getTimestampMs() >= deadline then break end
++        local job = queue[queue.first]
++        queue[queue.first] = nil
++        queue.first = queue.first + 1
++        queued[job.obj] = nil
++        count = count + 1
++        local sq = getCell():getGridSquare(job.x, job.y, job.z)
++        if sq and job.obj:getSquare() == sq and sq:getObjects():contains(job.obj) then
++            local ok, err = pcall(run, job.obj)
++            if not ok then print(LOG .. "legacy placement migration failed: " .. tostring(err)) end
++        end
++    end
++    if queue.first > queue.last then queue.first, queue.last = 1, 0 end
++    return count
++end
++
++local function migrationTick()
++    local deadline = getTimestampMs() + JOB_BUDGET_MS
++    local Floors, Overlays = MinidoracatBuilder.Floors, MinidoracatBuilder.Overlays
++    local count = 0
++    if Floors and Floors.instance then count = drainJobs(floorJobs, retryFloor, count, deadline) end
++    if Overlays and Overlays.instance then count = drainJobs(overlayJobs, Place.relink, count, deadline) end
++    if scanJobs.last > 0 or resetPosition then drainChunkScans(deadline, count > 0) end
++    if floorJobs.last == 0 and overlayJobs.last == 0 and scanJobs.last == 0 and not resetPosition then
++        watchingJobs = false
++        Events.OnTick.Remove(migrationTick)
++    end
++end
++
++local function watchMigration()
++    if watchingJobs then return end
++    watchingJobs = true
++    Events.OnTick.Add(migrationTick)
++end
++
++local function queueMigration(queue, obj, sq)
++    if queued[obj] then return end
++    queued[obj] = true
++    queue.last = queue.last + 1
++    queue[queue.last] = { obj = obj, x = sq:getX(), y = sq:getY(), z = sq:getZ() }
++    watchMigration()
++end
++
++-- Cache the static tile classification, including negative results, across chunk loads.
++-- Actual migration eligibility still comes from the saved object and ledgers.
++local overlaySprites, cornerSprites = {}, {}
+ local function hangs(spr)
++    local cached = overlaySprites[spr]
++    if cached ~= nil then return cached end
+     local p = spr:getProperties()
+-    if not (p:has(F.FloorOverlay) or p:has(F.WallOverlay)) then return false end
+-    local kind = Rules.classify(spr)
+-    return Rules.onFloor(kind, spr) or Rules.onWall(kind, spr) ~= nil
++    local result = false
++    if p:has(F.FloorOverlay) or p:has(F.WallOverlay) then
++        local kind = Rules.classify(spr)
++        result = Rules.onFloor(kind, spr) or Rules.onWall(kind, spr) ~= nil
++    end
++    overlaySprites[spr] = result
++    return result
++end
++
++local function isLegacyCornerSprite(spr)
++    local cached = cornerSprites[spr]
++    if cached ~= nil then return cached end
++    local result = false
++    if spr:getProperties():has(F.WallSE) then
++        local kind = Rules.classify(spr)
++        result = kind == nil or kind == "post"
++    end
++    cornerSprites[spr] = result
++    return result
+ end
+ 
+ -- 改之前可不可打：isThumpable() 在同一條邊有木板時一律回 true（IsoThumpable.java:1693-1695；isBarricaded 只比方向，
+@@ -2046,9 +2141,10 @@
+ 
+ -- 讀檔時照目前的沙盒值重設「殭屍打不壞」「殭屍敲不破門」（建造時已照當下的值設好）。只改和設定不一致的：兩個選項都關、
+ -- 沒改過的物件什麼都不動
+-function Place.harden(obj)
++function Place.harden(obj, settings)
++    settings = settings or Entry.settings()
+     if instanceof(obj, "IsoThumpable") then
+-        local on = proof("ZombieProof")
++        local on = settings.ZombieProof == true
+         if on == (obj:getThumpDmg() >= PROOF_DMG - 3) then return end
+         if on then
+             obj:setThumpDmg(proofDmg(wasThumpable(obj), obj:getThumpDmg()))
+@@ -2058,16 +2154,21 @@
+             obj:setIsThumpable(k % 2 == 1)
+             obj:setThumpDmg(k >= 2 and 1 or 8) -- 8＝IsoThumpable 的預設（IsoThumpable.java:106）
+         end
+-    elseif Place.keyed(obj) then -- 燈、家電（擋路的打得壞，見 newLight、newAppliance）
+-        local p = obj:getSprite() and obj:getSprite():getProperties()
+-        if not p then return end
+-        local want = (p:has(F.solid) or p:has(F.solidtrans)) and not proof("ZombieProof")
+-        if obj:isMovedThumpable() ~= want then obj:setMovedThumpable(want) end
++        return true -- Thumpability changed. Refresh pathfinding after chunk registration.
+     elseif instanceof(obj, "IsoDoor") then
+-        if proof("ZombieProofDoors") then
++        if settings.ZombieProofDoors == true then
+             if obj:getHealth() ~= DOOR_HP then obj:setHealth(DOOR_HP) end
+         elseif obj:getHealth() > obj:getMaxHealth() then
+             obj:setHealth(obj:getMaxHealth())
++        end
++    elseif Place.keyed(obj) then -- 燈、家電（擋路的打得壞，見 newLight、newAppliance）
++        local spr = obj:getSprite()
++        local p = spr and spr:getProperties()
++        if not p then return end
++        local want = (p:has(F.solid) or p:has(F.solidtrans)) and settings.ZombieProof ~= true
++        if obj:isMovedThumpable() ~= want then
++            obj:setMovedThumpable(want)
++            return true
+         end
+     end
+ end
+@@ -2076,14 +2177,14 @@
+ -- 100（ItemContainer.java:170），伺服器搬東西照它檢查（TransactionManager.java:247-253,272-278），設更大也放不進去。原本的容量
+ -- 照引擎建容器的算法（IsoObject.java:5272-5291；沒寫時一般 50、冷凍庫 15，ItemContainer.java:93）；認不出來的不動，本來就 ≥100 的
+ -- 算出來也是 100，和 getCapacity 一樣，不動。容量隨存檔（ItemContainer.java:2487,2506）。建造時在送給玩家之前設，讀檔時兩端照目前的值重設
+-function Place.fitContainers(obj)
++function Place.fitContainers(obj, settings)
+     local n = obj:getContainerCount()
+     if n == 0 then return end
+     local spr = obj:getSprite()
+     local p = spr and spr:getProperties()
+     if not p then return end
+     -- 倍率照百分之一取整、再用整數算四捨五入：二進位存不準的倍率直接乘，會在 .5 邊界少一格（50×1.15、15×4.1；滑桿一格 0.1 也會碰到）
+-    local m = math.floor((tonumber(Entry.settings().ContainerCapacityMultiplier) or 1) * 100 + 0.5)
++    local m = math.floor((tonumber((settings or Entry.settings()).ContainerCapacityMultiplier) or 1) * 100 + 0.5)
+     for i = 0, n - 1 do
+         local c = obj:getContainerByIndex(i)
+         local base
+@@ -2099,31 +2200,33 @@
+     end
+ end
+ 
+-function Place.migrate(obj)
+-    if not (obj:hasModData() and obj:getModData().builderEntry) then
+-        -- 原版撿起再放下的（onAdded）：在特殊物件裡（原版放下用 AddSpecialObject，存檔記旗標，IsoGridSquare.java:2856,3147,3233），
+-        -- 照目前的倍率補容量
+-        local moved = obj:hasModData() and movedEntry(obj:getModData())
+-        if moved and Place.keyed(obj) then Place.harden(obj) end -- 撿放過的家電（onAdded）；讀檔早於註冊尋路，不必重推
++function Place.migrate(obj, settings, authoritative, runtimeOnly)
++    local md = obj:hasModData() and obj:getModData()
++    local id = md and md.builderEntry
++    if not id then
++        local moved = md and movedEntry(md)
++        local changed
+         if moved then
+-            Place.fitContainers(obj)
+-            -- 舊版撿放過的只有巢狀記號：補上，再撿放才認得。客戶端可能已經拿到沒有序號的這一格，所以送一次
++            if Place.keyed(obj) then changed = Place.harden(obj, settings) end
++            Place.fitContainers(obj, settings)
+             if markMovable(obj, moved) and isServer() then obj:transmitModData() end
+         end
+-        -- 雙開門第 2、3 片開關過就換成沒記號、耐久照預設的新物件（IsoDoor.java:2738-2742）：照第一片認，讀檔時重套「殭屍敲不破門」
+-        -- （第一片那格還沒載入時這次漏掉，下次讀檔再補）；同一場裡開關的由 Place.reharden 補
+-        if instanceof(obj, "IsoDoor") and Place.ourDoor(obj) then Place.harden(obj) end
+-        return
+-    end
+-    if Place.onLoaded then Place.onLoaded(obj) end -- 客戶端登記開關，房間重建後補切房間燈（Client.lua）
+-    Place.harden(obj)
+-    Place.fitContainers(obj)
++        -- An unmarked door may belong to a group whose marked anchor is in a neighboring chunk.
++        local door = instanceof(obj, "IsoDoor")
++        if door and Place.ourDoor(obj) then Place.harden(obj, settings) end
++        return changed, false, moved or door
++    end
++
++    if Place.onLoaded then Place.onLoaded(obj) end
++    local changed = Place.harden(obj, settings)
++    Place.fitContainers(obj, settings)
+     local sq = obj:getSquare()
+-    -- 這一格的區域位元對一次（上面的 recheck）。門也排：車庫門、柵欄門自己帶牆屬性，那格可能沒有本工具別的東西
+-    if sq and not isClient() then
++    if authoritative == nil then authoritative = not isClient() end
++    -- Keep upstream's region repair for marked objects, including cache hits
++    -- and stair landings that can be in a neighboring chunk.
++    if sq and authoritative then
+         local x, y, z = sq:getX(), sq:getY(), sq:getZ()
+         Place.recheck(x, y, z)
+-        -- 樓梯頂片：上一層的平台是一般地板物件，讀檔時列不到（Dismantle.lua 的 stairInto：W 型頂片在平台東邊、N 型在南邊）
+         if sq:has(T.stairsTW) then
+             Place.recheck(x - 1, y, z + 1)
+         elseif sq:has(T.stairsTN) then
+@@ -2131,41 +2234,254 @@
+         end
+     end
+     if not instanceof(obj, "IsoThumpable") then
+-        -- 舊存檔的家電（newAppliance 以前沒記）
+-        if markMovable(obj, obj:getModData().builderEntry) and isServer() then obj:transmitModData() end
+-        return
+-    end
+-    local md = obj:getModData()
+-    if obj:getName() == nil then obj:setName(md.builderEntry) end -- 0.3.0 以前蓋的沒有名稱（見 thumpable 的 setName）
+-    if not sq then return end
++        if markMovable(obj, id) and isServer() then obj:transmitModData() end
++        return changed, false, true
++    end
++
++    if not runtimeOnly and obj:getName() == nil then obj:setName(id) end
++    if not sq then return changed, false, true end
+     local spr = obj:getSprite()
+     if groundFloor(obj, sq) then
+         if obj:isDismantable() then obj:setIsDismantable(false) end
+-        local Floors = MinidoracatBuilder.Floors
+-        if not (Floors and Floors.instance) then return end
+-        if obj:isFloor() and spr and spr:getName() == md.builderEntry and not Floors.get(obj)
+-            and Cost.refund("floor", spr) == "builder" then
+-            Floors.put(obj, obj:getBuildMaterials())
+-        end
+-        if obj:hasBuildMaterials() then wipe(obj:getBuildMaterials()) end
+-    elseif spr and not isClient() and spr:getName() == md.builderEntry and hangs(spr) then
+-        relinkQueue[#relinkQueue + 1] = obj
+-        if not relinking then
+-            relinking = true
+-            Events.OnTick.Add(relinkTick)
+-        end
+-    elseif spr and not obj:isCorner() and spr:getProperties():has(F.WallSE) then
+-        local kind = Rules.classify(spr)
+-        if kind == nil or kind == "post" then
++        if authoritative then
++            local Floors = MinidoracatBuilder.Floors
++            if Floors and Floors.instance then
++                return changed, false, true, not migrateFloorRefund(obj, id, spr)
++            end
++            queueMigration(floorJobs, obj, sq)
++            return changed, false, true, true
++        end
++    elseif not runtimeOnly then
++        if spr and authoritative and spr:getName() == id and hangs(spr) then
++            queueMigration(overlayJobs, obj, sq)
++            return changed, false, true, true
++        end
++        if spr and not obj:isCorner() and isLegacyCornerSprite(spr) then
+             obj:setCorner(true)
+             obj:setCanPassThrough(false)
+-        end
+-    end
+-end
+--- 特殊物件（IsoThumpable 都是）讀檔時另外列一份（IsoGridSquare.java:3232-3235），一般格子沒有
+-Events.LoadGridsquare.Add(function(sq)
+-    local list = sq:getSpecialObjects()
+-    for i = 0, list:size() - 1 do MinidoracatBuilder.Place.migrate(list:get(i)) end
++            return true, true, true
++        end
++    end
++    return changed, false, true
++end
++
++local CHUNK_AREA = CHUNK_SIZE * CHUNK_SIZE
++
++local function finishChunkScan(job, completed)
++    if completed and job.targets and job.pending then
++        local anchor = Cache.anchor(job.chunk)
++        if anchor then Cache.invalidate(anchor) end
++    end
++    if completed and job.candidates and not job.pending and not job.invalidated and job.indexTable == Cache.index() then
++        local anchor = Cache.anchor(job.chunk)
++        if anchor and Cache.key(anchor) == job.key and getCell():getGridSquare(anchor:getX(), anchor:getY(), 0) == anchor then
++            Cache.complete(job.indexTable, anchor, job.firstZ, job.maxZ, job.candidates)
++        end
++    end
++    scanByChunk[job.chunk] = nil
++    scanJobs[scanJobs.first] = nil
++    scanJobs.first = scanJobs.first + 1
++    if scanJobs.first > scanJobs.last then scanJobs.first, scanJobs.last = 1, 0 end
++end
++
++local function selectTarget(job, slot)
++    job.z, job.tile = math.floor(slot / CHUNK_AREA), slot % CHUNK_AREA
++end
++
++local function resetCursor(job, indexTable, targets)
++    job.indexTable, job.targets, job.targetPosition = indexTable, targets, 1
++    job.candidates = job.key and indexTable and not targets and {} or nil
++    job.square, job.seen, job.index, job.size = nil, nil, 0, nil
++    job.pending, job.invalidated, job.candidate = false, false, false
++    job.tile, job.z = 0, job.firstZ
++    if targets then selectTarget(job, targets[1]) end
++end
++
++local function advanceScanSquare(job)
++    if job.candidates and job.candidate then
++        job.candidates[#job.candidates + 1] = job.z * CHUNK_AREA + job.tile
++    end
++    job.square, job.seen, job.index, job.size = nil, nil, 0, nil
++    job.candidate = false
++    if job.targets then
++        job.targetPosition = job.targetPosition + 1
++        local slot = job.targets[job.targetPosition]
++        if slot then selectTarget(job, slot) else finishChunkScan(job, true) end
++        return
++    end
++    job.tile = job.tile + 1
++    if job.tile == CHUNK_AREA then job.tile, job.z = 0, job.z + 1 end
++    if job.z > job.maxZ then finishChunkScan(job, true) end
++end
++
++local onLoadChunk
++
++local function enqueueResetChunk(cell)
++    local tracked = observedChunks[resetPosition]
++    resetPosition = resetPosition + 1
++    if resetPosition > resetLast then resetPosition = nil end
++    local anchor = cell:getGridSquare(tracked.x, tracked.y, 0)
++    if anchor and anchor:getChunk() == tracked.chunk then onLoadChunk(tracked.chunk) end
++end
++
++drainChunkScans = function(deadline, repaired)
++    local cell, settings, authoritative = getCell(), Entry.settings(), not isClient()
++    local steps = 0
++    while resetPosition and steps < MAX_SCAN_STEPS_PER_TICK do
++        if (repaired or steps > 0) and getTimestampMs() >= deadline then return end
++        enqueueResetChunk(cell)
++        steps = steps + 1
++    end
++    while scanJobs.first <= scanJobs.last and steps < MAX_SCAN_STEPS_PER_TICK do
++        if (repaired or steps > 0) and getTimestampMs() >= deadline then break end
++        local job = scanJobs[scanJobs.first]
++        local indexTable = Cache.index()
++        if job.indexTable ~= indexTable or (job.targets and job.invalidated) then
++            resetCursor(job, indexTable, nil)
++        end
++        local sq = job.square
++        local resumed = sq ~= nil
++        steps = steps + 1 -- Count the square visit, including empty slots and revalidation.
++        if not sq then
++            local x, y = math.floor(job.tile / CHUNK_SIZE), job.tile % CHUNK_SIZE
++            sq = job.chunk:getGridSquare(x, y, job.z)
++            if sq then job.x, job.y = sq:getX(), sq:getY() end
++        end
++        if not sq then
++            if job.targets then
++                local anchor = Cache.anchor(job.chunk)
++                if anchor then Cache.invalidate(anchor) end
++                resetCursor(job, indexTable, nil)
++            else
++                advanceScanSquare(job)
++            end
++        elseif cell:getGridSquare(job.x, job.y, job.z) ~= sq then
++            -- The queued chunk left the world. A later LoadChunk creates a fresh cursor.
++            finishChunkScan(job)
++        else
++            job.square = sq
++            local objects = sq:getSpecialObjects()
++            local size = objects:size()
++            if job.size and job.size ~= size then job.index = 0 end
++            job.size = size
++            local changed, cornerChanged
++            while job.index < size and steps < MAX_SCAN_STEPS_PER_TICK do
++                -- On an otherwise idle tick, allow one resumed object visit so a slow
++                -- square lookup cannot leave the cursor stuck at the same object forever.
++                if (repaired or steps > 1 or not resumed) and getTimestampMs() >= deadline then break end
++                local obj = objects:get(job.index)
++                job.index = job.index + 1
++                steps = steps + 1
++                if obj and not (job.seen and job.seen[obj]) then
++                    if not job.seen then job.seen = {} end
++                    job.seen[obj] = true
++                    local ok, pathChanged, corner, candidate, pending = pcall(Place.migrate, obj, settings, authoritative, job.targets ~= nil)
++                    if ok then
++                        changed = changed or pathChanged
++                        cornerChanged = cornerChanged or corner
++                        job.candidate = job.candidate or candidate
++                        job.pending = job.pending or pending
++                    else
++                        job.pending = true
++                        print(LOG .. "chunk placement migration failed: " .. tostring(pathChanged))
++                    end
++                end
++            end
++            if cornerChanged then sq:RecalcAllWithNeighbours(true) end
++            if changed then sq:setSquareChanged() end
++            if job.index < size then break end
++            advanceScanSquare(job)
++        end
++    end
++end
++
++onLoadChunk = function(chunk)
++    local firstZ, maxZ = chunk:getMinLevel(), chunk:getMaxLevel()
++    if firstZ > maxZ then return end
++    local indexTable, anchor, coordinate, targets = Cache.index()
++    if not isClient() then
++        anchor = Cache.anchor(chunk)
++        if anchor then
++            coordinate = Cache.key(anchor)
++            local slot = observedSlots[chunk]
++            if not slot then
++                slot = #observedChunks + 1
++                observedSlots[chunk] = slot
++                observedChunks[slot] = { chunk = chunk }
++            end
++            local observed = observedChunks[slot]
++            observed.x, observed.y = anchor:getX(), anchor:getY()
++            targets = Cache.lookup(indexTable, anchor, firstZ, maxZ)
++        end
++    end
++    local job = scanByChunk[chunk]
++    if targets and #targets == 0 and not job then return end
++    if not job then
++        job = { chunk = chunk }
++        scanByChunk[chunk] = job
++        scanJobs.last = scanJobs.last + 1
++        scanJobs[scanJobs.last] = job
++    end
++    -- IsoChunk instances can be reused. Each load restarts that instance's pending cursor.
++    job.firstZ, job.maxZ, job.key = firstZ, maxZ, coordinate
++    resetCursor(job, indexTable, targets and #targets > 0 and targets or nil)
++    watchMigration()
++end
++
++invalidateChunkCache = function(square)
++    if not square then return end
++    if not isClient() then
++        Cache.invalidate(square)
++        local job = scanByChunk[square:getChunk()]
++        if job then job.invalidated = true end
++    end
++    local active = scanJobs[scanJobs.first]
++    if active and active.square == square then active.index = 0 end
++end
++
++local function objectChanged(obj)
++    if obj and not instanceof(obj, "IsoWorldInventoryObject") then invalidateChunkCache(obj:getSquare()) end
++end
++
++local function invalidateDoorDestination(obj)
++    if isClient() or not (instanceof(obj, "IsoDoor") or instanceof(obj, "IsoThumpable")) then return end
++    local sq = obj:getSquare()
++    if not sq then return end
++    local x, y = sq:getX(), sq:getY()
++    local minX, maxX = math.floor((x - 1) / CHUNK_SIZE), math.floor((x + 1) / CHUNK_SIZE)
++    local minY, maxY = math.floor((y - 1) / CHUNK_SIZE), math.floor((y + 1) / CHUNK_SIZE)
++    if minX == maxX and minY == maxY then return end
++    local leaf = IsoDoor.getDoubleDoorIndex(obj)
++    if leaf ~= 2 and leaf ~= 3 then return end
++    -- Native double doors can recreate a leaf on a neighboring square without OnObjectAdded.
++    local fromX, fromY = math.floor(x / CHUNK_SIZE), math.floor(y / CHUNK_SIZE)
++    local cell = getCell()
++    for cx = minX, maxX do
++        for cy = minY, maxY do
++            if cx ~= fromX or cy ~= fromY then
++                invalidateChunkCache(cell:getGridSquare(cx * CHUNK_SIZE, cy * CHUNK_SIZE, 0))
++            end
++        end
++    end
++end
++
++function Place.resetMigrationCache()
++    if not Cache.reset() then return end
++    if #observedChunks > 0 then resetPosition, resetLast = 1, #observedChunks end
++    if resetPosition or scanJobs.last > 0 then watchMigration() end
++    print(LOG .. "builder migration cache reset")
++end
++
++Events.OnObjectAboutToBeRemoved.Add(function(obj)
++    objectChanged(obj)
++    invalidateDoorDestination(obj)
++    MinidoracatBuilder.Place.onAboutToBeRemoved(obj)
+ end)
++Events.OnObjectAdded.Add(function(obj)
++    objectChanged(obj)
++    MinidoracatBuilder.Place.onAdded(obj)
++end)
++Events.LoadChunk.Add(onLoadChunk)
++ApocalipseBR_BuilderChunkHookReady = true
+ 
+ return Place

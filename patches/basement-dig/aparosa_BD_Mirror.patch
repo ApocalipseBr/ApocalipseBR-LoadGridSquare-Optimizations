@@ -1,0 +1,234 @@
+--- a/media/lua/shared/aparosa_BasementDig/aparosa_BD_Mirror.lua
++++ b/media/lua/shared/aparosa_BasementDig/aparosa_BD_Mirror.lua
+@@ -14,11 +14,11 @@
+     錨と記録の全てのマス（aparosa_BD_Expand.tilesOf）の modData へ写しを置く。chunk ごとに保存の時が違うので、どのマスの
+     chunk が保存されていても、そこまでの写しが残る（初めは錨だけに置き、錨の chunk が拡張より先に保存されて、戻した記録に
+     拡張したマスが無かった）。マスの modData は chunk と一緒に保存され、空でない時だけ書かれる（IsoGridSquare.java 2955・9679 行）。
+-  - 戻す: 地下のマスが読まれた時（LoadGridsquare、サーバーと単機）に写しを集め、OnTick で 120 tick 後に（読込の時の
++  - 戻す: 地下を含む chunk が読まれた時（LoadChunk、サーバーと単機）に写しを集め、OnTick で 120 tick 後に（読込の時の
+     登録し直し aparosa_BD_Rooms.reapplyAll の後）同じ地下室（錨と向きが同じ）の写しのうち版の一番新しい物を取る。
+     戻すまでは写さない（sync は ready まで何もしない）。戻した後に今の記録を写しの元にし（baseline。版は変えず、写しの無い
+     マスへだけ置く）、その後は chunk が読まれる度に 30 tick ごとに戻す物を見る。
+-    錨のマスがまだ読まれていなければ待つ。錨に床が無ければ（丸ごと埋め戻した）戻さない。錨を含む記録が
++    錨の chunk がまだ読まれていなければ写しを保持する。錨に床が無ければ（丸ごと埋め戻した）戻さない。錨を含む記録が
+       無い → 写しを記録へ足して部屋を登録する
+       同じ地下室で版が古い → 写しの中身で置き換えて登録し直す（拡張の後に落ちた時）
+       ほかの地下室（まとめられた等） → 戻さない
+@@ -26,6 +26,7 @@
+ 
+ require "aparosa_BasementDig/aparosa_BD_Rooms"
+ require "aparosa_BasementDig/aparosa_BD_Expand"
++require "aparosa_BasementDig/aparosa_BD_Build"
+ 
+ aparosa_BD_Mirror = aparosa_BD_Mirror or {}
+ 
+@@ -133,53 +134,98 @@
+     end
+ end
+ 
+--- 読込の後の 1 回目: 今の記録を「写した形」として覚え、写しの無いマスへだけ置く（版は変えない。写しの無い前の世界は版を付ける）
++-- Keep an unversioned legacy record at version zero so an expansion copy
++-- discovered later can still supersede it.
+ local function baseline()
+     local cell = getCell()
+     if not cell then
+         return
+     end
+-    local now = getTimestampMs()
+     for _, record in ipairs(aparosa_BD_Rooms.saved()) do
+-        if not record.mirrorVer then
+-            record.mirrorVer = now
+-        end
+         writeCopies(cell, record, true)
+         mirrored[record] = shape(record)
+     end
+ end
+ 
+--- ■ 戻す
+-local pending = {}
+-local started = -1
+-
+-local function onLoadGridsquare(sq)
+-    if isClient() or not sq or sq:getZ() >= 0 or not sq:hasModData() then
+-        return
+-    end
+-    local rec = sq:getModData()[KEY]
+-    if type(rec) == "table" then
+-        table.insert(pending, rec)
++local pending, waitingAnchors = {}, {}
++local waitingAnchorCount = 0
++local ticksLeft
++local onTick
++
++local function keepNewest(records, id, record)
++    local previous = records[id]
++    if not previous or (record.mirrorVer or 0) > (previous.mirrorVer or 0) then
++        records[id] = record
++    end
++end
++
++local function startTimer(ticks)
++    if not ticksLeft then
++        ticksLeft = ticks
++        Events.OnTick.Add(onTick)
++    end
++end
++
++function aparosa_BD_Mirror.hasWaitingAnchors()
++    return waitingAnchorCount > 0
++end
++
++function aparosa_BD_Mirror.collectChunk(chunk, minZ, key)
++    local collected = false
++    local waiting = key and waitingAnchors[key]
++    if waiting then
++        waitingAnchors[key] = nil
++        waitingAnchorCount = waitingAnchorCount - 1
++        collected = true
++        for id, record in pairs(waiting) do
++            keepNewest(pending, id, record)
++        end
++    end
++    if minZ < 0 then
++        for z = minZ, math.min(-1, chunk:getMaxLevel()) do
++            for x = 0, 7 do
++                for y = 0, 7 do
++                    local sq = chunk:getGridSquare(x, y, z)
++                    if sq and sq:hasModData() then
++                        local record = sq:getModData()[KEY]
++                        if type(record) == "table" and not sq:getObjects():isEmpty() then
++                            local id = identity(record)
++                            if id then
++                                keepNewest(pending, id, record)
++                                collected = true
++                            end
++                        end
++                    end
++                end
++            end
++        end
++    end
++    if ready and collected then
++        startTimer(30)
+     end
+ end
+ 
+ local function restorePending()
+-    -- 同じ地下室の写しのうち版の一番新しい物
+-    local newest = {}
+-    for _, rec in ipairs(pending) do
+-        local id = identity(rec)
+-        if id and (not newest[id] or (rec.mirrorVer or 0) > (newest[id].mirrorVer or 0)) then
+-            newest[id] = rec
+-        end
+-    end
++    local cell = getCell()
++    if not cell then
++        return
++    end
++    local newest = pending
+     pending = {}
+-    local cell = getCell()
+     local changed = {}
+     for id, rec in pairs(newest) do
+         local x, y, z = anchorOf(rec)
+         local sq = cell:getGridSquare(x, y, z)
+-        -- 錨がまだ読まれていない時は何もしない（読まれた時に錨の写しがまた並ぶ）。錨に床が無い時は丸ごと埋め戻した物
+-        if sq and sq:getFloor() then
++        if not sq and not cell:getChunkForGridSquare(x, y, z) then
++            local key = aparosa_BD_Build.chunkKey(x, y)
++            local waiting = waitingAnchors[key]
++            if not waiting then
++                waiting = {}
++                waitingAnchors[key] = waiting
++                waitingAnchorCount = waitingAnchorCount + 1
++            end
++            keepNewest(waiting, id, rec)
++        elseif sq and sq:getFloor() then
+             local live = aparosa_BD_Expand.findRecordAt(x, y, z)
+             if not live then
+                 local record = copy(rec)
+@@ -208,37 +254,60 @@
+             return true
+         end)
+         log(string.format("restored records registered: %d / %d", ok, #changed))
++        for _, record in ipairs(changed) do
++            -- A recovered copy already has a version. Preserve it so newer
++            -- copies in chunks that have yet to load can still win.
++            if ready then
++                writeCopies(cell, record, true)
++                mirrored[record] = shape(record)
++            end
++            if aparosa_BD_Ladder then
++                aparosa_BD_Ladder.retryRestoredRecord(cell, record)
++            end
++        end
+         if aparosa_BD_Sync then
+             aparosa_BD_Sync.publish()
+         end
+     end
+ end
+ 
+-local function onTick()
+-    if started < 0 then
+-        return
+-    end
+-    started = started + 1
+-    -- 読込の時の登録し直し（aparosa_BD_Rooms、60 tick 後）の後に、まず写しから戻し、次に今の記録を写しの元にする
+-    if started == 120 then
+-        restorePending()
++onTick = function()
++    ticksLeft = ticksLeft - 1
++    if ticksLeft > 0 then
++        return
++    end
++    if not getCell() then
++        ticksLeft = 1
++        return
++    end
++    ticksLeft = nil
++    Events.OnTick.Remove(onTick)
++    restorePending()
++    if not ready then
+         baseline()
+         ready = true
+-        return
+-    end
+-    -- その後も chunk が読まれる度に 30 tick ごとに見る
+-    if ready and started % 30 == 0 and #pending > 0 then
+-        restorePending()
+-    end
+-end
+-
+-Events.LoadGridsquare.Add(onLoadGridsquare)
+-Events.OnGameStart.Add(function()
+-    started = 0
++    end
++end
++
++Events.OnInitGlobalModData.Add(function()
++    if isClient() then
++        return
++    end
++    Events.OnTick.Remove(onTick)
++    pending, waitingAnchors = {}, {}
++    waitingAnchorCount = 0
++    mirrored = setmetatable({}, { __mode = "k" })
++    ready, ticksLeft = false, nil
+ end)
+-Events.OnServerStarted.Add(function()
+-    started = 0
+-end)
+-Events.OnTick.Add(onTick)
++
++local function startRecovery()
++    if not isClient() then
++        -- Run after the startup room registration, even if no chunk had copies.
++        startTimer(120)
++        ApocalipseBR_BasementRecoveryReady = true
++    end
++end
++Events.OnGameStart.Add(startRecovery)
++Events.OnServerStarted.Add(startRecovery)
+ 
+ return aparosa_BD_Mirror

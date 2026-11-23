@@ -1,4 +1,4 @@
-"""Download, test and package the generated True Swimming companion."""
+"""Download Workshop sources, compile and test Lua overrides, and package the companions."""
 import argparse
 import json
 import os
@@ -9,8 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from scripts.steamcmd import bundled_steamcmd
-from scripts.true_swimming import COMPANION, OUTPUT_PATH
-from tests.compatibility import BASELINES, ROOT, check, download, generate_true_swimming, mod_info
+from tests.compatibility import BASELINES, GENERATED, ROOT, check, download, generate_companion, mod_info, version_layer
 
 
 def configured_output():
@@ -71,7 +70,7 @@ def promote(package, destination):
         lock.rmdir()
 
 
-def build_package(source, output):
+def build_package(generated, output):
     project = json.loads((ROOT / "project.json").read_text(encoding="utf-8"))
     title = project["title"]
     if title in ("", ".", "..") or Path(title).name != title:
@@ -91,9 +90,10 @@ def build_package(source, output):
         shutil.copy2(ROOT / "project.json", stage)
         for folder in (*project["mods"], "workshop"):
             shutil.copytree(ROOT / folder, stage / folder)
-        target = stage / OUTPUT_PATH
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(source)
+        for relative, source in generated.items():
+            target = stage / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source)
 
         packaged = scratch / "package"
         subprocess.run(
@@ -101,12 +101,17 @@ def build_package(source, output):
             check=True,
         )
         package = packaged / title
-        installed = package / "Contents/mods" / OUTPUT_PATH
-        if installed.read_bytes() != source:
-            raise ValueError(f"Packaged Lua differs from the tested source at {installed}")
-        info = mod_info(installed.parents[3])
-        if info.get("id") != COMPANION or info.get("require") != project["mods"][COMPANION]["require"]:
-            raise ValueError("Packaged True Swimming mod.info has unexpected metadata")
+        mods = package / "Contents/mods"
+        for relative, source in generated.items():
+            installed = mods / relative
+            if installed.read_bytes() != source:
+                raise ValueError(f"Packaged Lua differs from the tested source at {installed}")
+        for companion, settings in project["mods"].items():
+            info = mod_info(version_layer(mods / companion))
+            if (info.get("id"), info.get("require"), info.get("versionMin")) != (
+                companion, settings["require"], settings.get("versionMin")
+            ):
+                raise ValueError(f"Packaged {companion} mod.info has unexpected metadata")
         promote(package, destination)
     return destination
 
@@ -117,23 +122,25 @@ def main():
     source.add_argument("--steamcmd", type=Path, help="Standalone SteamCMD executable")
     source.add_argument("--workshop-root", type=Path, help="Existing steamapps/workshop/content/108600 directory")
     parser.add_argument("--reviewed", action="store_true", help="Use reviewed item IDs in an existing cache")
-    parser.add_argument("--check-upstream", action="store_true", help="Also check the other three mods' override baselines")
+    parser.add_argument("--check-upstream", action="store_true", help="Also check the checked-in LiuDing Tiles override baseline")
     parser.add_argument("--output", type=Path, help="Parent directory of the generated Workshop package")
     args = parser.parse_args()
     if args.reviewed and not args.workshop_root:
         parser.error("--reviewed requires --workshop-root")
 
-    spec = BASELINES["mods"][COMPANION]
-    other_mods = [name for name in BASELINES["mods"] if name != COMPANION]
+    other_mods = BASELINES["mods"].keys() - GENERATED.keys()
     try:
         workshop = args.workshop_root
         steamcmd = args.steamcmd or os.environ.get("STEAMCMD") or shutil.which("steamcmd")
         provision = bundled_steamcmd() if not workshop and not steamcmd else nullcontext(steamcmd)
         with provision as executable:
             if workshop is None:
-                ids = None if args.check_upstream else [spec["workshop_id"]]
+                ids = None if args.check_upstream else [spec["workshop_id"] for spec in GENERATED.values()]
                 workshop = download(Path(executable), ids=ids)
-            generated = generate_true_swimming(workshop.resolve(), reviewed=args.reviewed)
+            workshop = workshop.resolve()
+            generated = {}
+            for companion in GENERATED:
+                generated.update(generate_companion(workshop, companion, reviewed=args.reviewed))
             if args.check_upstream:
                 errors = check(workshop, reviewed=args.reviewed, companions=other_mods)
                 if errors:

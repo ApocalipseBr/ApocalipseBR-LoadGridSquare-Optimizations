@@ -1,0 +1,83 @@
+--- a/media/lua/shared/aparosa_BasementDig/aparosa_BD_Build.lua
++++ b/media/lua/shared/aparosa_BasementDig/aparosa_BD_Build.lua
+@@ -251,8 +251,8 @@
+ -- 最下階が偶数に見えて飛ばしてしまった（2026-09-26 実測: 直す前に掘った B1 の chunk (1348,1180) だけ印が置かれなかった）
+ -- v1.3.0 までの印（地中の塊）を見えない印へ置き換える。組の下側の階（偶数）で、物が地中の塊 1 つだけ、
+ -- 真上のマスに床がある所だけを本 mod の印と見る（印は床のあるマスの真下に置いた）
+-local function swapOldMarkers(chunk)
+-    for z = chunk:getMinLevel(), -2 do
++local function swapOldMarkers(chunk, minZ)
++    for z = minZ, -2 do
+         if z % 2 == 0 then
+             for ly = 0, 7 do
+                 for lx = 0, 7 do
+@@ -279,9 +279,9 @@
+     end
+ end
+ 
+-local function markLoadedChunk(chunk)
+-    swapOldMarkers(chunk)
+-    for z = chunk:getMinLevel(), -1 do
++local function markLoadedChunk(chunk, minZ)
++    swapOldMarkers(chunk, minZ)
++    for z = minZ, -1 do
+         if z % 2 ~= 0 and z - 1 >= aparosa_BD_Check.BOTTOM then
+             local done = false
+             for ly = 0, 7 do
+@@ -297,15 +297,50 @@
+     end
+ end
+ 
++-- B42 chunks contain 8 x 8 squares. Only resolve a chunk's world key when
++-- stalled recovery work is waiting for a chunk to load.
++function aparosa_BD_Build.chunkKey(x, y)
++    return math.floor(x / 8) .. "," .. math.floor(y / 8)
++end
++
++local function loadedChunkKey(chunk, minZ)
++    local square = chunk:getGridSquare(0, 0, 0)
++    if not square then
++        for z = minZ, chunk:getMaxLevel() do
++            for x = 0, 7 do
++                for y = 0, 7 do
++                    square = chunk:getGridSquare(x, y, z)
++                    if square then
++                        return aparosa_BD_Build.chunkKey(square:getX(), square:getY())
++                    end
++                end
++            end
++        end
++        return nil
++    end
++    return aparosa_BD_Build.chunkKey(square:getX(), square:getY())
++end
++
+ local function onLoadChunk(chunk)
+-    -- 客では何もしない（2026-09-26 に外した）。サーバーの印（placeLevelMarker）が chunk の保存と送信に入るので、
+-    -- 客で空のマスを予約しなくても、起こし直して入った後と、同じ遊びの中で続けて掘った時の両方で B2 が描かれた
+-    -- （MP の Air の客、workshop/shots/obs/cleanup-p1-*.png）
+-    if not isClient() then
+-        markLoadedChunk(chunk)
+-    end
++    if isClient() then
++        return
++    end
++    local minZ = chunk:getMinLevel()
++    local mirror, ladder = aparosa_BD_Mirror, aparosa_BD_Ladder
++    local key
++    if (mirror and mirror.hasWaitingAnchors()) or (ladder and ladder.hasWaitingExits()) then
++        key = loadedChunkKey(chunk, minZ)
++    end
++    if mirror then
++        mirror.collectChunk(chunk, minZ, key)
++    end
++    if ladder and key then
++        ladder.retryChunk(key)
++    end
++    markLoadedChunk(chunk, minZ)
+ end
+ Events.LoadChunk.Add(onLoadChunk)
++ApocalipseBR_BasementChunkHookReady = true
+ 
+ -- 客の OnObjectAdded（地下の物が届く度に予約と光の計算し直し。2026-09-24 に足した）は 2026-09-26 に外した。
+ -- サーバーの印で下の階が chunk の送信に入るので、客で何もしなくても、同じ遊びの中で B1 を掘ってすぐ下を掘った B2 が

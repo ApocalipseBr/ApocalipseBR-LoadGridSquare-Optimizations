@@ -1,6 +1,6 @@
 # MinidoracatBuilder migration cache
 
-`minidoracatbuilderfix` requires `MinidoracatBuilderFor42` from [Workshop item 3830045886](https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886). The companion replaces `42/media/lua/shared/MinidoracatBuilder/Place.lua` from upstream `42.22.2-1.1.1`. It targets Project Zomboid Build `42.22.2` and later. Recheck the same-path override after an upstream update.
+`minidoracatbuilderfix` requires `MinidoracatBuilderFor42` from [Workshop item 3830045886](https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886). The build applies the local [placement diff](../../patches/minidoracat-builder/Place.patch) to upstream `Place.lua` and emits the override at `42/media/lua/shared/MinidoracatBuilder/Place.lua`. The diff was rebased onto `42.22.2-1.3.0`. It targets Project Zomboid Build `42.22.2` and later. The generated file retains upstream sliding-door handling and schedules the upstream missing-region-flag recheck for marked objects, including cached candidates and adjacent stair landings.
 
 ## Chunk loading and cache validity
 

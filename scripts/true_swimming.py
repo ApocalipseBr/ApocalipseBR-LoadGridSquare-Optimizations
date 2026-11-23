@@ -3,7 +3,6 @@ from pathlib import Path
 
 COMPANION = "ApocalipseBR_TrueSwimming_fix"
 LUA_PATH = "media/lua/shared/TrueSwimmingShared.lua"
-OUTPUT_PATH = Path(COMPANION, "42", LUA_PATH)
 PATCH_DIR = Path(__file__).resolve().parents[1] / "patches/true-swimming"
 
 

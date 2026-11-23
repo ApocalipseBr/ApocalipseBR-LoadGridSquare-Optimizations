@@ -17,16 +17,18 @@
       "reviewed_modversion": "1.9",
       "overrides": {
         "media/lua/shared/TrueSwimmingShared.lua": "deb3f26592e660dc926824c6b33911dc6ab0a47a88702ebdf94ec7173dfe999b"
-      }
+      },
+      "patch_dir": "true-swimming"
     },
     "minidoracatbuilderfix": {
       "mod_id": "MinidoracatBuilderFor42",
       "workshop_id": "3830045886",
       "reviewed_workshop_id": "3830045886",
-      "reviewed_modversion": "42.22.2-1.1.1",
+      "reviewed_modversion": "42.22.2-1.3.0",
       "overrides": {
-        "media/lua/shared/MinidoracatBuilder/Place.lua": "440daf3eaac3d7aa9ce8ccf57750d5f5a8f868ec5c9ee7c0e5eb56226f9f2e90"
-      }
+        "media/lua/shared/MinidoracatBuilder/Place.lua": "daac2bd7abe78c63b8b8b464d0a90f933de9b8b0c72dcf5ef949c927c9a9eb31"
+      },
+      "patch_dir": "minidoracat-builder"
     },
     "apocalipsebr_basementdig_fix": {
       "mod_id": "aparosa_BasementDig",
@@ -37,7 +39,8 @@
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Build.lua": "3244a5017e832903aaaa6fa64a7d807455ef607a6cc6a983bbed5216a62cbb03",
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Ladder.lua": "18f18230163d096055c5f53ca05cadc4afd9fc2e67aa6add053f7457a58372bd",
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Mirror.lua": "f13df937cb0f616e05fe35cfbc41759292ddca67d99ac88cc2434eb934419f1a"
-      }
+      },
+      "patch_dir": "basement-dig"
     }
   }
 }

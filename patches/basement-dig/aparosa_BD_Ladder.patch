@@ -1,0 +1,184 @@
+--- a/media/lua/shared/aparosa_BasementDig/aparosa_BD_Ladder.lua
++++ b/media/lua/shared/aparosa_BasementDig/aparosa_BD_Ladder.lua
+@@ -1136,7 +1136,7 @@
+ -- ■ 本 mod を外して保存した世界を、本 mod を戻して読んだ時（サーバーと単機。todo B31、利用者の決定 2026-10-04「都按照建議」）。
+ -- 見える梯子は原版の絵（carpentry_02_84〜87）なので外しても残るが、見えない縄・頂・塞ぐ物は本 mod の絵で、外した間に保存すると
+ -- 絵の名の無い物（getSprite が nil）として保存され、戻しても上れなかった（段 9 ②の単機の試し、docs/evidence/remove-midgame-2026-10-04/）。
+--- 地下のマスが読まれた時、梯子の絵が在って縄が無く、梯子の所として正しければ（restoreTop。搬運で付け直した時と同じ決まり）、
++-- 梯子の絵が読まれた後の tick に、縄が無く、梯子の所として正しければ（restoreTop。搬運で付け直した時と同じ決まり）、
+ -- 3 つのマスの絵の無い物を外してから置き直す
+ local function removeSpriteless(sq)
+     local objs = sq and sq:getObjects()
+@@ -1149,39 +1149,155 @@
+     end
+ end
+ 
+-local function onLoadGridsquare(sq)
+-    if isClient() or not sq or sq:getZ() >= 0 then
+-        return
+-    end
++-- MapObjects is called while Java is still integrating the chunk's objects.
++-- Store coordinates only and perform mutations on a later main-thread tick.
++local loadJobs, queued, waitingExits = {}, {}, {}
++local firstJob, lastJob, waitingExitCount = 1, 0, 0
++local LOAD_REPAIRS_PER_TICK = 8
++local flushLoadJobs
++
++local function queueLoadJob(x, y, z)
++    local key = x .. "," .. y .. "," .. z
++    if queued[key] then
++        return
++    end
++    if lastJob == 0 then
++        Events.OnTick.Add(flushLoadJobs)
++    end
++    lastJob = lastJob + 1
++    loadJobs[lastJob] = { key = key, x = x, y = y, z = z }
++    queued[key] = true
++end
++
++local function onLadderSpriteLoaded(object)
++    local sq = object:getSquare()
++    if sq and sq:getZ() < 0 then
++        queueLoadJob(sq:getX(), sq:getY(), sq:getZ())
++    end
++end
++
++function aparosa_BD_Ladder.hasWaitingExits()
++    return waitingExitCount > 0
++end
++
++function aparosa_BD_Ladder.retryChunk(key)
++    local jobs = waitingExits[key]
++    if jobs then
++        waitingExits[key] = nil
++        waitingExitCount = waitingExitCount - 1
++        for _, job in pairs(jobs) do
++            queueLoadJob(job.x, job.y, job.z)
++        end
++    end
++end
++
++-- A legacy ladder may have loaded before its basement record was recovered.
++function aparosa_BD_Ladder.retryRestoredRecord(cell, record)
++    if aparosa_BD_Ladder.VANILLA_LADDER then
++        return
++    end
++    for _, tile in ipairs(aparosa_BD_Expand.tilesOf(record)) do
++        local sq = cell:getGridSquare(tile.x, tile.y, record.z)
++        if aparosa_BD_Ladder.ladderDir(sq) then
++            queueLoadJob(tile.x, tile.y, record.z)
++        end
++    end
++end
++
++local function missingExitChunk(cell, job, d)
++    local x, y = job.x + d.dx, job.y + d.dy
++    if not cell:getChunkForGridSquare(x, y, job.z) then
++        return aparosa_BD_Build.chunkKey(x, y)
++    end
++    return nil
++end
++
++local function repairLoadedLadder(cell, job)
++    local x, y, z = job.x, job.y, job.z
++    local sq = cell:getGridSquare(x, y, z)
+     local dir = aparosa_BD_Ladder.ladderDir(sq)
+     if not dir then
+         return
+     end
++    local d = aparosa_BD_Ladder.DIRS[dir]
+     if aparosa_BD_Ladder.VANILLA_LADDER then
+-        -- 42.22 から: 42.21 で建てた梯子（縄か頂が在る）を、縄と頂の無い形へ替える（上れなくなるため。docs/ladder-4222-plan-zh-tw.md）
+-        local up = getCell():getGridSquare(sq:getX(), sq:getY(), sq:getZ() + 1)
+-        if aparosa_BD_Ladder.ropeDir(sq) == dir or aparosa_BD_Ladder.topDir(up) == dir then
+-            installParts(up, sq, dir)
+-            aparosa_BD_Sync.publish()
+-            log(string.format("ladder converted for the vanilla ladder at %d,%d,%d dir=%s", sq:getX(), sq:getY(), sq:getZ(), dir))
+-        end
+-        return
++        local top = cell:getGridSquare(x, y, z + 1)
++        if not top or (aparosa_BD_Ladder.ropeDir(sq) ~= dir and aparosa_BD_Ladder.topDir(top) ~= dir) then
++            return
++        end
++        -- East and south use a collision object on the neighboring square.
++        local missing = d.block and missingExitChunk(cell, job, d)
++        if missing then
++            return nil, missing
++        end
++        installParts(top, sq, dir)
++        log(string.format("ladder converted for the vanilla ladder at %d,%d,%d dir=%s", x, y, z, dir))
++        return true
+     end
+     if aparosa_BD_Ladder.ropeDir(sq) then
+         return
+     end
+-    local top = restoreTop(sq, dir)
++    local top, reason = restoreTop(sq, dir)
+     if not top then
++        if reason == "IGUI_aparosa_BasementDig_Reason_LadderExitNoFloor" then
++            return nil, missingExitChunk(cell, job, d)
++        end
+         return
+     end
+     removeSpriteless(sq)
+     removeSpriteless(top)
+     removeSpriteless(blockSquare(sq, dir))
+     installParts(top, sq, dir)
+-    aparosa_BD_Sync.publish()
+-    log(string.format("ladder repaired after load at %d,%d,%d dir=%s", sq:getX(), sq:getY(), sq:getZ(), dir))
+-end
+-Events.LoadGridsquare.Add(onLoadGridsquare)
++    log(string.format("ladder repaired after load at %d,%d,%d dir=%s", x, y, z, dir))
++    return true
++end
++
++flushLoadJobs = function()
++    local cell = getCell()
++    if not cell then
++        return
++    end
++    local changed = false
++    local limit = math.min(lastJob, firstJob + LOAD_REPAIRS_PER_TICK - 1)
++    for i = firstJob, limit do
++        local job = loadJobs[i]
++        loadJobs[i], queued[job.key] = nil, nil
++        firstJob = i + 1
++        local repaired, waitFor = repairLoadedLadder(cell, job)
++        changed = repaired or changed
++        if waitFor then
++            local waiting = waitingExits[waitFor]
++            if not waiting then
++                waiting = {}
++                waitingExits[waitFor] = waiting
++                waitingExitCount = waitingExitCount + 1
++            end
++            waiting[job.key] = job
++        end
++    end
++    if firstJob > lastJob then
++        firstJob, lastJob = 1, 0
++        Events.OnTick.Remove(flushLoadJobs)
++    end
++    if changed then
++        aparosa_BD_Sync.publish()
++    end
++end
++
++Events.OnInitGlobalModData.Add(function()
++    if isClient() then
++        return
++    end
++    Events.OnTick.Remove(flushLoadJobs)
++    loadJobs, queued, waitingExits = {}, {}, {}
++    firstJob, lastJob, waitingExitCount = 1, 0, 0
++    local sprites = {}
++    for sprite in pairs(LADDER_DIR_OF) do
++        table.insert(sprites, sprite)
++    end
++    MapObjects.OnLoadWithSprite(sprites, onLadderSpriteLoaded, 17)
++    ApocalipseBR_BasementLadderHookReady = true
++end)
+ 
+ -- 向きの組にするか。置く時だけ（持ち上げる時に向きの組にすると、原版の持ち上げの動作が始まってすぐ止まり、梯子が外れなかった。
+ -- 2026-10-03 MP の橋の movepick で、ISMoveablesAction が並んですぐ消えた）。置く動作を作る時は置く所（ISMoveablesAction:new の square）、

@@ -4,8 +4,9 @@ from pathlib import Path
 
 from lupa.lua51 import LuaRuntime
 
-from scripts.true_swimming import COMPANION, OUTPUT_PATH, PATCH_DIR, patch_source
-from tests.compatibility import BASELINES, ROOT, lua_files, mod_info, version_layer
+from scripts.lua_diff import apply_diff, unified_diff
+from scripts.true_swimming import PATCH_DIR, patch_source
+from tests.compatibility import BASELINES, GENERATED, GENERATED_TESTS, ROOT, lua_files, mod_info, version_layer
 from tests.lua_runner import LUA_TESTS, run_lua_spec
 
 
@@ -25,9 +26,11 @@ class PatchTests(unittest.TestCase):
                 files = lua_files(mod)
                 lua = LuaRuntime()
                 for name in spec["overrides"]:
-                    if companion == COMPANION:
+                    if companion in GENERATED:
                         self.assertNotIn(name.lower(), files)
-                        self.assertEqual(OUTPUT_PATH, Path(companion, layer.name, name))
+                        if spec["patch_dir"] != "true-swimming":
+                            diff = ROOT / "patches" / spec["patch_dir"] / (Path(name).stem + ".patch")
+                            self.assertTrue(diff.is_file(), diff)
                         continue
                     self.assertIn(name.lower(), files)
                     file = files[name.lower()]
@@ -40,8 +43,9 @@ class PatchTests(unittest.TestCase):
         def read_patch(companion, path):
             return lua_files(ROOT / companion)[path.lower()].read_bytes()
 
+        build_specs = {name for tests in GENERATED_TESTS.values() for name in tests}
         for spec in sorted(LUA_TESTS.glob("*_spec.lua")):
-            if spec.name != "true_swimming_spec.lua":
+            if spec.name not in build_specs:
                 with self.subTest(spec=spec.name):
                     run_lua_spec(spec.name, read_patch)
 
@@ -54,6 +58,22 @@ class PatchTests(unittest.TestCase):
             with self.subTest(newline=newline):
                 source = prefix + before.replace(b"\n", newline) + suffix
                 self.assertEqual(patch_source(source), prefix + after.replace(b"\n", newline) + suffix)
+
+    def test_diff_preserves_shifted_context_and_mixed_newlines(self):
+        original = b"one\ntwo\nthree\nfour\nfive\n"
+        modified = original.replace(b"three\n", b"third\nadded\n")
+        patch = unified_diff(original, modified, b"example.lua")
+        source = b"shifted\n" + original.replace(b"\n", b"\r\n").replace(b"two\r\n", b"two\n")
+        expected = source.replace(b"three\r\n", b"third\r\nadded\r\n")
+        self.assertEqual(apply_diff(source, patch), expected)
+
+    def test_diff_rejects_missing_or_ambiguous_context(self):
+        original = b"one\ntwo\nthree\n"
+        patch = unified_diff(original, b"one\nthree\n", b"example.lua")
+        for source in (original.replace(b"two", b"upstream edit"), original * 2):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(ValueError, "expected exactly one"):
+                    apply_diff(source, patch)
 
     def test_generation_requires_one_complete_hook(self):
         before = (PATCH_DIR / "orphan-pontoon.before.lua").read_bytes()

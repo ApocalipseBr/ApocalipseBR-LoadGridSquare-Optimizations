@@ -8,7 +8,7 @@ This is a Project Zomboid Build 42 multi-mod project managed with the [PZ Studio
 | --- | --- |
 | `project.json` | PZ Studio project and Workshop settings, mod IDs, dependency declarations and build options. |
 | `package.json` | Project commands for generating and packaging the companions, watching authored files, and cleaning output. |
-| `patches/true-swimming/` | Exact upstream orphan-pontoon callback and its replacement. |
+| `patches/` | Unified Lua diffs for Builder and BasementDig. Before and after snippets for True Swimming. |
 | `<mod-id>/42/` | Build 42 mod metadata and any version-specific runtime files. |
 | `<mod-id>/common/` | Assets and Lua shared across versions of that mod. |
 | `workshop/` | Workshop description and preview for the bundle. |
@@ -16,7 +16,7 @@ This is a Project Zomboid Build 42 multi-mod project managed with the [PZ Studio
 | `.libraries/`, `.vscode/` | Lua language-server references and editor settings. |
 | `.docs/` | Indexed issues, reports and feature documentation. Start with [.docs/AGENTS.md](.docs/AGENTS.md). |
 
-Keep each fix independently enableable under its own mod ID. Declare the original mod as a dependency so it loads first. For a file override, match the upstream path relative to the mod's media root, including filename case. Keep unrelated upstream assets in the original mod. Edit authored files and run `npm run build` from the root so True Swimming is generated and tested before PZ Studio packages it. Verify the generated package contains the expected Lua path and effective Build 42 `mod.info`. Keep authored metadata and the matching `project.json` entry consistent.
+Keep each fix independently enableable under its own mod ID. Declare the original mod as a dependency so it loads first. For a file override, match the upstream path relative to the mod's media root, including filename case. Keep unrelated upstream assets in the original mod. Edit authored files and run `npm run build` from the root so the Builder, BasementDig and True Swimming overrides are generated and tested before PZ Studio packages it. Verify the generated package contains the expected Lua path and effective Build 42 `mod.info`. Keep authored metadata and the matching `project.json` entry consistent.
 
 ## Runtime changes
 

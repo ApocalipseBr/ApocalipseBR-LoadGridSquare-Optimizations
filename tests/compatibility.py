@@ -13,8 +13,17 @@ BASELINES = json.loads((ROOT / "tests/workshop-baselines.json").read_text(encodi
 
 if __package__ in ("", None):
     sys.path.insert(0, str(ROOT))
-from scripts.true_swimming import COMPANION, LUA_PATH, patch_source
+from scripts.lua_diff import apply_diff
+from scripts.true_swimming import COMPANION as SWIMMING, patch_source
 
+GENERATED = {
+    companion: spec for companion, spec in BASELINES["mods"].items() if "patch_dir" in spec
+}
+GENERATED_TESTS = {
+    SWIMMING: ("true_swimming_spec.lua", "true_swimming_dock.lua"),
+    "minidoracatbuilderfix": ("builder_spec.lua",),
+    "apocalipsebr_basementdig_fix": ("basement_spec.lua",),
+}
 
 
 def build_number(version):
@@ -77,81 +86,92 @@ def digest(path):
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
-def generate_true_swimming(workshop_root, *, reviewed):
-    from lupa.lua51 import LuaError
-    from tests.lua_runner import run_lua_spec
-
-    spec = BASELINES["mods"][COMPANION]
+def upstream_files(workshop_root, companion, spec, reviewed):
     item_id = spec["reviewed_workshop_id"] if reviewed else spec["workshop_id"]
     upstream = find_mod(workshop_root / item_id, spec["mod_id"])
     version = mod_info(version_layer(upstream)).get("modversion", "unlisted version")
-    original = lua_files(upstream).get(LUA_PATH.lower())
-    if original is None:
-        raise ValueError(f"True Swimming {item_id} ({version}): missing {LUA_PATH}")
+    label = f"{companion}: Workshop item {item_id} ({version})"
+    original = lua_files(upstream)
+    authored = lua_files(ROOT / companion)
+    expected = {path.lower() for path in spec["overrides"]}
+    collisions = original.keys() & authored.keys()
+    if companion not in GENERATED:
+        missing = expected - collisions
+        if missing:
+            raise ValueError(f"{label}: missing replacement paths: {', '.join(sorted(missing))}")
+        collisions -= expected
+    if collisions:
+        raise ValueError(f"{label}: unexpected authored overrides: {', '.join(sorted(collisions))}")
+    return label, original, authored
 
-    source = original.read_bytes()
-    observed = hashlib.sha256(source.replace(b"\r\n", b"\n")).hexdigest()
-    baseline = spec["overrides"][LUA_PATH]
-    if observed != baseline:
-        print(f"INFO True Swimming {item_id} ({version}): upstream file changed from reviewed SHA-256 {baseline} to {observed}")
 
-    generated = patch_source(source)
+def generate_companion(workshop_root, companion, *, reviewed):
+    from lupa.lua51 import LuaError
+    from tests.lua_runner import run_lua_spec
 
-    def read_patch(companion, path):
-        if (companion, path) != (COMPANION, LUA_PATH):
-            raise ValueError(f"Unexpected Lua fixture request: {companion}/{path}")
-        return generated
+    spec = GENERATED[companion]
+    label, original, authored = upstream_files(workshop_root, companion, spec, reviewed)
+    generated = {}
+    for path, baseline in spec["overrides"].items():
+        file = original.get(path.lower())
+        if file is None or not file.as_posix().endswith("/" + path):
+            raise ValueError(f"{label}: missing exact upstream path {path}")
+        source = file.read_bytes()
+        observed = hashlib.sha256(source.replace(b"\r\n", b"\n")).hexdigest()
+        if observed != baseline:
+            print(f"INFO {label}: {path} changed from reviewed SHA-256 {baseline} to {observed}")
+        try:
+            if companion == SWIMMING:
+                generated[path] = patch_source(source)
+            else:
+                patch = ROOT / "patches" / spec["patch_dir"] / (Path(path).stem + ".patch")
+                generated[path] = apply_diff(source, patch.read_bytes())
+        except (OSError, ValueError) as error:
+            raise ValueError(f"{label}: {path}: {error}. Review patches/{spec['patch_dir']}.") from error
 
-    try:
-        run_lua_spec("true_swimming_spec.lua", read_patch, restrict=True)
-        if not reviewed:
-            run_lua_spec("true_swimming_dock.lua", read_patch, restrict=True)
-    except (LuaError, MemoryError) as error:
-        raise ValueError(f"True Swimming {item_id} ({version}): generated Lua failed regression tests: {error}") from error
-    print(f"PASS True Swimming {item_id} ({version}): replaced one hook and tested generated Lua ({observed})")
-    return generated
+    def read_patch(requested_companion, path):
+        if requested_companion != companion:
+            raise ValueError(f"Unexpected Lua fixture request: {requested_companion}/{path}")
+        if path in generated:
+            return generated[path]
+        return authored[path.lower()].read_bytes()
+
+    for test in GENERATED_TESTS[companion]:
+        if reviewed and test == "true_swimming_dock.lua":
+            continue  # The reviewed 1.9 source predates dock support.
+        try:
+            run_lua_spec(test, read_patch, restrict=True)
+        except (LuaError, MemoryError) as error:
+            raise ValueError(f"{label}: {test} failed on generated Lua: {error}") from error
+
+    print(f"PASS {label}: generated and tested {len(generated)} Lua override(s)")
+    return {Path(companion, version_layer(ROOT / companion).name, path): source for path, source in generated.items()}
 
 
 def check(workshop_root, *, reviewed, companions=None):
     errors = []
     for companion in companions if companions is not None else BASELINES["mods"]:
         spec = BASELINES["mods"][companion]
-        if companion == COMPANION:
-            try:
-                generate_true_swimming(workshop_root, reviewed=reviewed)
-            except (OSError, ValueError) as error:
-                errors.append(str(error))
-            continue
-        item_id = spec["reviewed_workshop_id"] if reviewed else spec["workshop_id"]
         try:
-            upstream = find_mod(workshop_root / item_id, spec["mod_id"])
-            original = lua_files(upstream)
-            patch = lua_files(ROOT / companion)
+            if companion in GENERATED:
+                generate_companion(workshop_root, companion, reviewed=reviewed)
+                continue
+            label, original, authored = upstream_files(workshop_root, companion, spec, reviewed)
         except (OSError, ValueError) as error:
             errors.append(str(error))
             continue
 
-        version = mod_info(version_layer(upstream)).get("modversion", "unlisted version")
-        expected = {path.lower() for path in spec["overrides"]}
-        actual = original.keys() & patch.keys()
-        for path in sorted(expected - actual):
-            errors.append(f"{companion}: replacement path missing from companion or Workshop item {item_id}: {path}")
-        for path in sorted(actual - expected):
-            errors.append(f"{companion}: untracked Lua override in Workshop item {item_id}: {path}")
-
         for path, baseline in spec["overrides"].items():
             key = path.lower()
-            if key not in actual:
-                continue
             observed = digest(original[key])
             if observed != baseline:
                 errors.append(
-                    f"{companion}: upstream drift in {item_id} ({version}): {path}\n"
+                    f"{label}: upstream drift in {path}\n"
                     f"  Reviewed SHA-256: {baseline}\n  Current SHA-256:  {observed}\n"
-                    f"  Compare {original[key]} with {patch[key]} before updating the baseline."
+                    f"  Compare {original[key]} with {authored[key]} before updating the baseline."
                 )
             else:
-                print(f"PASS {item_id} ({version}) -> {companion}: {path} ({observed})")
+                print(f"PASS {label}: {path} ({observed})")
     return errors
 
 
