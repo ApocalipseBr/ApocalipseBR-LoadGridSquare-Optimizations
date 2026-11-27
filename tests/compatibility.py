@@ -22,7 +22,7 @@ GENERATED = {
 GENERATED_TESTS = {
     SWIMMING: ("true_swimming_spec.lua", "true_swimming_dock.lua"),
     "minidoracatbuilderfix": ("builder_spec.lua",),
-    "apocalipsebr_basementdig_fix": ("basement_spec.lua",),
+    "apocalipsebr_basementdig_fix": ("basement_spec.lua", "expansion_spec.lua"),
 }
 
 

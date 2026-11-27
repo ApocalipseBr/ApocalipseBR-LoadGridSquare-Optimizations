@@ -27,6 +27,7 @@ class PatchTests(unittest.TestCase):
                 self.assertEqual(info["require"], configured[companion]["require"])
                 self.assertEqual(info["require"], "\\" + spec["mod_id"])
                 self.assertEqual(info.get("versionMin"), configured[companion].get("versionMin"))
+                self.assertEqual(info.get("loadModAfter"), configured[companion].get("loadModAfter"))
                 files = lua_files(mod)
                 lua = LuaRuntime()
                 for name in spec["overrides"]:

@@ -12,6 +12,8 @@ Use lowercase kebab-case filenames and relative Markdown links. Keep this index 
 
 - [Upstream override compatibility](issues/upstream-override-compatibility.md) documents how to check upstream updates and the True Swimming Workshop reference discrepancy.
 
+- [BasementDig room registration stalls the dedicated server tick](issues/basementdig-room-registration-stutter.md) tracks the synchronous registration bottleneck.
+
 ## Reports
 
 - [2026-11-22 dedicated-server square-load snapshot](reports/2026-11-22-dedicated-server-square-load.md) records the baseline and measurement limits.
@@ -24,6 +26,8 @@ Use lowercase kebab-case filenames and relative Markdown links. Keep this index 
 
 - [2026-11-27 Workshop refresh and basement adoption](reports/2026-11-27-workshop-refresh-and-basement-adoption.md) records the installed revisions, the floor-adoption spike and the validation of the refreshed package.
 - [2026-11-27 Basement Building performance report for the maintainer](reports/2026-11-27-basementdig-telemetry-for-author.md) explains the 30.027-second window, the worst tick, JVM counters and the adoption refactor.
+
+- [2026-11-27 BasementDig room registration stutter](reports/2026-11-27-basementdig-room-registration-stutter.md) ties the 228 ms adoption sample to the world-wide editor passes and records the profiling plan.
 
 ## Features
 

@@ -1,0 +1,128 @@
+--- a/media/lua/shared/aparosa_BasementDig/aparosa_BD_Entity.lua
++++ b/media/lua/shared/aparosa_BasementDig/aparosa_BD_Entity.lua
+@@ -74,8 +74,9 @@
+ function aparosa_BD_Entity.asBuilder(character, fn, ...)
+     local before = aparosa_BD_Check.buildCharacter
+     aparosa_BD_Check.buildCharacter = character or before
+-    local a, b, c = fn(...)
++    local ok, a, b, c = pcall(fn, ...)
+     aparosa_BD_Check.buildCharacter = before
++    if not ok then error(a, 0) end
+     return a, b, c
+ end
+ 
+@@ -166,6 +167,11 @@
+ -- 範囲は 1 マスで、カーソルのマスが新しく掘るマス。判定は aparosa_BD_Expand.validate。
+ -- 頭上の理由は、同じマス・同じ理由では 1 度だけ出す
+ local lastExpandNote = nil
++local pendingExpansions = {}
++
++local function expansionKey(x, y, z)
++    return x .. "," .. y .. "," .. z
++end
+ 
+ -- 原木の壁の拡張は、木の地下室には置けない（aparosa_BD_Expand.validate の tier）
+ function aparosa_BD_Entity.OnIsValidExpandLog(params)
+@@ -190,6 +196,14 @@
+         return false
+     end
+     local x, y, z = square:getX(), square:getY(), square:getZ()
++    if isServer() then
++        local key = expansionKey(x, y, z)
++        local ticket = pendingExpansions[key]
++        if ticket and (ticket.status == "pending" or ticket.status == "running") then
++            return false
++        end
++        pendingExpansions[key] = nil
++    end
+     local ok, reason = aparosa_BD_Expand.validate(x, y, z, tier)
+     if ok then
+         -- 広がる記録の作った人のマス数の上限（1.6.0 の段 5。宿主が無ければ地図の地下室の拡張で、建てる人の新しい記録）
+@@ -213,6 +227,35 @@
+         end
+     end
+     return ok
++end
++
++local function completeExpansion(character, x, y, z, tier, half, plan)
++    local canSpoil, whySpoil = aparosa_BD_Spoil.canExpand(character)
++    if not canSpoil then
++        -- カーソルでは見ているので、ここへ来るのは建てる間に袋を手放した時だけ
++        log("entity: expand refused " .. tostring(whySpoil))
++        aparosa_BD_Check.notifyFailure(character, whySpoil)
++        return false
++    elseif not aparosa_BD_Entity.asBuilder(character, aparosa_BD_Expand.apply, x, y, z, tier, nil, nil, plan) then
++        log("entity: expand failed")
++        aparosa_BD_Check.notifyFailure(character, nil)
++        return false
++    elseif not (aparosa_BD_Types.tier(tier) and aparosa_BD_Types.tier(tier).cost) then
++        -- 材料を取らない等級（土の壁）は返す物も無い（aparosa_BD_Types.registerTier の cost が nil）
++        aparosa_BD_Spoil.onExpanded(character)
++        aparosa_BD_Sync.publish()
++    else
++        aparosa_BD_Spoil.onExpanded(character)
++        local walls = aparosa_BD_Expand.wallsBuiltAround(x, y, z)
++        local refund = aparosa_BD_Expand.refundFor(aparosa_BD_Types.tier(tier).cost, half == true, walls,
++            aparosa_BD_Sandbox.materialFactor())
++        aparosa_BD_Expand.giveRefund(character, refund)
++        local parts = {}
++        for item, n in pairs(refund) do table.insert(parts, item .. "=" .. n) end
++        log(string.format("expand refund walls=%d half=%s %s", walls, tostring(half == true), table.concat(parts, " ")))
++        aparosa_BD_Sync.publish()
++    end
++    return true
+ end
+ 
+ -- half = 材料半分の版（entity_basement_half.txt）か。建てなかった壁の材料を返す量が変わる（aparosa_BD_Expand.refundFor）
+@@ -222,28 +265,30 @@
+     -- 置かれた物は目印なので、先に取り除く
+     square:transmitRemoveItemFromSquare(thumpable)
+     local x, y, z = square:getX(), square:getY(), square:getZ()
+-    local canSpoil, whySpoil = aparosa_BD_Spoil.canExpand(params.character)
+-    if not canSpoil then
+-        -- カーソルでは見ているので、ここへ来るのは建てる間に袋を手放した時だけ
+-        log("entity: expand refused " .. tostring(whySpoil))
+-        aparosa_BD_Check.notifyFailure(params.character, whySpoil)
+-    elseif not aparosa_BD_Entity.asBuilder(params.character, aparosa_BD_Expand.apply, x, y, z, tier) then
+-        log("entity: expand failed")
+-        aparosa_BD_Check.notifyFailure(params.character, nil)
+-    elseif not (aparosa_BD_Types.tier(tier) and aparosa_BD_Types.tier(tier).cost) then
+-        -- 材料を取らない等級（土の壁）は返す物も無い（aparosa_BD_Types.registerTier の cost が nil）
+-        aparosa_BD_Spoil.onExpanded(params.character)
+-        aparosa_BD_Sync.publish()
++    local character = params.character
++    local key, ticket = expansionKey(x, y, z), nil
++    local function complete(plan)
++        if ticket then
++            pendingExpansions[key] = nil
++            local host = aparosa_BD_Expand.findHost(x, y, z)
++            local ok, reason = aparosa_BD_Owner.canGrow(character, host)
++            if not ok then
++                aparosa_BD_Check.notifyFailure(character, reason)
++                return false
++            end
++        end
++        return completeExpansion(character, x, y, z, tier, half, plan)
++    end
++    local library = aparosa_BD_Sync.deferredLibrary()
++    local jobs = library and library.Jobs
++    local queue = jobs and jobs.forMod and jobs.forMod("aparosa_BasementDig")
++    if queue then
++        ticket = queue.start(aparosa_BD_Expand.newJob(x, y, z, complete))
++    end
++    if ticket then
++        pendingExpansions[key] = ticket
+     else
+-        aparosa_BD_Spoil.onExpanded(params.character)
+-        local walls = aparosa_BD_Expand.wallsBuiltAround(x, y, z)
+-        local refund = aparosa_BD_Expand.refundFor(aparosa_BD_Types.tier(tier).cost, half == true, walls,
+-            aparosa_BD_Sandbox.materialFactor())
+-        aparosa_BD_Expand.giveRefund(params.character, refund)
+-        local parts = {}
+-        for item, n in pairs(refund) do table.insert(parts, item .. "=" .. n) end
+-        log(string.format("expand refund walls=%d half=%s %s", walls, tostring(half == true), table.concat(parts, " ")))
+-        aparosa_BD_Sync.publish()
++        complete()
+     end
+     return { objectAlreadyTransmitted = true }
+ end

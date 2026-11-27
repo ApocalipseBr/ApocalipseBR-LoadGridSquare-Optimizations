@@ -1,0 +1,149 @@
+--- a/media/lua/shared/aparosa_BasementDig/aparosa_BD_Expand.lua
++++ b/media/lua/shared/aparosa_BasementDig/aparosa_BD_Expand.lua
+@@ -650,13 +650,18 @@
+ 
+ -- 地図の地下室に接する時の 1 マスの拡張。宿主は、接する本 mod の地下室の記録（あれば 1 つにまとめる）。
+ -- 無ければ kind = "map" の新しい記録を作る
++local function expansionRecords(x, y, z, host)
++    local record = host or aparosa_BD_Expand.findHost(x, y, z)
++    return record, aparosa_BD_Expand.othersAround(x, y, z, record)
++end
++
+ local function applyTouchingMap(x, y, z, tier, look)
++    local record, others = aparosa_BD_Expand.withFrozenIndex(expansionRecords, x, y, z)
+     local sq = aparosa_BD_Build.squareAt(x, y, z)
+     aparosa_BD_Build.removeEarth(sq)
+     sq:addFloor(look.floor)
+     local removed, added = applyLocalWalls(x, y, z, look)
+ 
+-    local record = aparosa_BD_Expand.findHost(x, y, z)
+     local isNew = record == nil
+     if isNew then
+         record = { kind = "map", z = z, variant = "wood", extra = {} }
+@@ -666,7 +671,7 @@
+     end
+     record.extra = record.extra or {}
+     table.insert(record.extra, { x = x, y = y })
+-    aparosa_BD_Expand.joinOthers(record, aparosa_BD_Expand.othersAround(x, y, z, record))
++    aparosa_BD_Expand.joinOthers(record, others)
+ 
+     for dx = -1, 1 do
+         for dy = -1, 1 do
+@@ -950,13 +955,29 @@
+     end
+ end
+ 
+-function aparosa_BD_Expand.apply(x, y, z, tier, fromAbove, host)
++local function appendTiles(tiles, record)
++    for _, tile in ipairs(aparosa_BD_Expand.tilesOf(record)) do
++        tiles[#tiles + 1] = tile
++    end
++end
++
++local function matchesPlan(plan, record, others)
++    if not plan or plan.index ~= index.byKey or plan.record ~= record or #plan.others ~= #others then
++        return false
++    end
++    for i, other in ipairs(others) do
++        if plan.others[i] ~= other then return false end
++    end
++    return true
++end
++
++function aparosa_BD_Expand.apply(x, y, z, tier, fromAbove, host, plan)
+     local look = aparosa_BD_Build.SPRITE.tier[tier]
+     if not look then
+         log("expand: unknown tier " .. tostring(tier))
+         return false
+     end
+-    local ok, reason = aparosa_BD_Expand.validate(x, y, z, tier, fromAbove, host)
++    local ok, reason = aparosa_BD_Expand.withFrozenIndex(aparosa_BD_Expand.validate, x, y, z, tier, fromAbove, host)
+     if not ok then
+         log("expand refused " .. tostring(reason))
+         return false
+@@ -964,16 +985,15 @@
+     if aparosa_BD_Expand.touchesMap(x, y, z) then
+         return applyTouchingMap(x, y, z, tier, aparosa_BD_Expand.lookFor(x, y, z, look))
+     end
+-    local record = host or aparosa_BD_Expand.findHost(x, y, z)
+-    local others = aparosa_BD_Expand.othersAround(x, y, z, record)
+-    -- 宿主と、接した別の地下室のマスをまとめた形に 1 マス足した時の壁の差分
+-    local tiles = aparosa_BD_Expand.tilesOf(record)
+-    for _, o in ipairs(others) do
+-        for _, t in ipairs(aparosa_BD_Expand.tilesOf(o)) do
+-            table.insert(tiles, t)
+-        end
+-    end
+-    local diff = aparosa_BD_Layout.expandDiff(tiles, { x = x, y = y })
++    local record, others = aparosa_BD_Expand.withFrozenIndex(expansionRecords, x, y, z, host)
++    local tiles, diff
++    if matchesPlan(plan, record, others) then
++        tiles, diff = plan.tiles, plan.diff
++    else
++        tiles = aparosa_BD_Expand.tilesOf(record)
++        for _, other in ipairs(others) do appendTiles(tiles, other) end
++        diff = aparosa_BD_Layout.expandDiff(tiles, { x = x, y = y })
++    end
+     -- 同じマスで「角（NW）を外して片方（W か N）を置く」は「もう片方だけを外す」に直す。そのまま外して置き直すと、残る辺まで
+     -- 新しいマスの見た目になり、木の地下室の角の壁が土の壁に変わった（2026-10-01、上から掘る穴を 4x2 の北西角の北へ足した時。
+     -- tools/mixed-basement-survey.sh の 10 番）。removeWall は角の片方を外す時、残す辺を外した角と同じ見た目で置き直す
+@@ -1045,4 +1065,59 @@
+     return true
+ end
+ 
++-- A pending step keeps the same ticket. The completion callback owns all world writes.
++function aparosa_BD_Expand.newJob(x, y, z, complete)
++    local plan, nextRecord = nil, 0
++    local searchMs, geometryMs, pauses = 0, 0, 0
++    local function pause()
++        pauses = pauses + 1
++        return false
++    end
++    return function(_, checkpoint)
++        local start = getTimestampMs()
++        if nextRecord == 0 then
++            if not aparosa_BD_Expand.touchesMap(x, y, z) then
++                local record, others = aparosa_BD_Expand.withFrozenIndex(expansionRecords, x, y, z)
++                if record then
++                    plan = { index = index.byKey, record = record, others = others, tiles = {} }
++                end
++            end
++            nextRecord = 1
++            searchMs = getTimestampMs() - start
++            if checkpoint() then return pause() end
++        elseif plan and not plan.diff then
++            -- Other world callbacks can change saved records while the ticket is paused.
++            if recordIndex() ~= plan.index then plan = nil end
++            searchMs = searchMs + getTimestampMs() - start
++            if not plan and checkpoint() then return pause() end
++        end
++
++        if plan and not plan.diff then
++            start = getTimestampMs()
++            while nextRecord <= #plan.others + 1 do
++                local record = nextRecord == 1 and plan.record or plan.others[nextRecord - 1]
++                appendTiles(plan.tiles, record)
++                nextRecord = nextRecord + 1
++                if checkpoint() then
++                    geometryMs = geometryMs + getTimestampMs() - start
++                    return pause()
++                end
++            end
++            plan.diff = aparosa_BD_Layout.expandDiff(plan.tiles, { x = x, y = y })
++            geometryMs = geometryMs + getTimestampMs() - start
++            if checkpoint() then return pause() end
++        end
++
++        start = getTimestampMs()
++        local result = complete(plan)
++        local finishMs = getTimestampMs() - start
++        if searchMs + geometryMs + finishMs >= 100 then
++            print(string.format("[BasementDig] slow expand x=%d y=%d z=%d searchMs=%d"
++                .. " geometryMs=%d finishMs=%d pauses=%d result=%s",
++                x, y, z, searchMs, geometryMs, finishMs, pauses, tostring(result)))
++        end
++        return true
++    end
++end
++
+ return aparosa_BD_Expand

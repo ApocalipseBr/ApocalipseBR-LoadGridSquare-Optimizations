@@ -67,7 +67,7 @@
  end
  
  -- 退料寫在伺服器建立的 Java 欄位 buildMaterials（原版拆解讀它），一樓以下的地板改記在地板帳本（groundFloor）；
-@@ -1632,13 +1660,28 @@
+@@ -1634,13 +1662,28 @@
              parts[#parts + 1] = ft .. "x" .. n
          end
      end
@@ -103,7 +103,7 @@
      end
      print(LOG .. "RELINK overlay e=" .. name .. " at=" .. at(sq) .. " refund=" .. table.concat(parts, ","))
      return true
-@@ -1794,6 +1837,7 @@
+@@ -1796,6 +1839,7 @@
  -- 依序放好 cells 的每一格（{ sq, spr, cost, yoff, role }）。物件一建好就記進 placed（之後出錯時拆回用；還沒加進格子的
  -- 拆回時會略過）。丟錯由呼叫端 pcall 接。
  function Place.build(kind, cells, placed)
@@ -111,7 +111,7 @@
      local first = #placed + 1
      if kind == "stairs" then
          placeStairs(cells, placed)
-@@ -2078,7 +2122,6 @@
+@@ -2080,7 +2124,6 @@
      if Floors and sq and sq:getZ() <= 0 and obj:isFloor() then Floors.forget(obj) end
      if obj:hasModData() and obj:getModData().builderEntry then wipe(obj:getBuildMaterials()) end
  end
@@ -119,7 +119,7 @@
  
  -- 原版撿起再放下是建新物件：容量、殭屍打不壞回到原版值，照目前沙盒值補回（同讀檔的 migrate；兩個都冪等，本 MOD 自己蓋的、
  -- 多人客戶端收到的再走一次不變）。記號：實心家具由原版寫回頂層（ISMoveableSpriteProps.lua:1335-1349）；不擋路的（牆櫃、
-@@ -2118,43 +2161,96 @@
+@@ -2120,43 +2163,96 @@
      end
      if send and isServer() then obj:transmitModData() end -- 物件封包已經送出（上面），序號與名字另外送
  end
@@ -251,7 +251,7 @@
  end
  
  -- 改之前可不可打：isThumpable() 在同一條邊有木板時一律回 true（IsoThumpable.java:1693-1695；isBarricaded 只比方向，
-@@ -2169,9 +2265,10 @@
+@@ -2171,9 +2267,10 @@
  
  -- 讀檔時照目前的沙盒值重設「殭屍打不壞」「殭屍敲不破門」（建造時已照當下的值設好）。只改和設定不一致的：兩個選項都關、
  -- 沒改過的物件什麼都不動
@@ -264,7 +264,7 @@
          if on == (obj:getThumpDmg() >= PROOF_DMG - 3) then return end
          if on then
              obj:setThumpDmg(proofDmg(wasThumpable(obj), obj:getThumpDmg()))
-@@ -2181,16 +2278,21 @@
+@@ -2183,16 +2280,21 @@
              obj:setIsThumpable(k % 2 == 1)
              obj:setThumpDmg(k >= 2 and 1 or 8) -- 8＝IsoThumpable 的預設（IsoThumpable.java:106）
          end
@@ -292,7 +292,7 @@
          end
      end
  end
-@@ -2199,14 +2301,14 @@
+@@ -2201,14 +2303,14 @@
  -- 100（ItemContainer.java:170），伺服器搬東西照它檢查（TransactionManager.java:247-253,272-278），設更大也放不進去。原本的容量
  -- 照引擎建容器的算法（IsoObject.java:5272-5291；沒寫時一般 50、冷凍庫 15，ItemContainer.java:93）；認不出來的不動，本來就 ≥100 的
  -- 算出來也是 100，和 getCapacity 一樣，不動。容量隨存檔（ItemContainer.java:2487,2506）。建造時在送給玩家之前設，讀檔時兩端照目前的值重設
@@ -309,21 +309,21 @@
      for i = 0, n - 1 do
          local c = obj:getContainerByIndex(i)
          local base
-@@ -2222,31 +2324,33 @@
+@@ -2224,32 +2326,33 @@
      end
  end
  
 -function Place.migrate(obj)
--    if not (obj:hasModData() and obj:getModData().builderEntry) then
+-    local md = obj:hasModData() and obj:getModData() -- 每個特殊物件都走這裡，Java 呼叫只做一次
+-    if not (md and md.builderEntry) then
 -        -- 原版撿起再放下的（onAdded）：在特殊物件裡（原版放下用 AddSpecialObject，存檔記旗標，IsoGridSquare.java:2856,3147,3233），
 -        -- 照目前的倍率補容量
--        local moved = obj:hasModData() and movedEntry(obj:getModData())
--        if moved and Place.keyed(obj) then Place.harden(obj) end -- 撿放過的家電（onAdded）；讀檔早於註冊尋路，不必重推
 +function Place.migrate(obj, settings, authoritative, runtimeOnly)
 +    local md = obj:hasModData() and obj:getModData()
 +    local id = md and md.builderEntry
 +    if not id then
-+        local moved = md and movedEntry(md)
+         local moved = md and movedEntry(md)
+-        if moved and Place.keyed(obj) then Place.harden(obj) end -- 撿放過的家電（onAdded）；讀檔早於註冊尋路，不必重推
 +        local changed
          if moved then
 -            Place.fitContainers(obj)
@@ -362,15 +362,14 @@
          if sq:has(T.stairsTW) then
              Place.recheck(x - 1, y, z + 1)
          elseif sq:has(T.stairsTN) then
-@@ -2254,41 +2358,254 @@
+@@ -2257,51 +2360,260 @@
          end
      end
      if not instanceof(obj, "IsoThumpable") then
 -        -- 舊存檔的家電（newAppliance 以前沒記）
--        if markMovable(obj, obj:getModData().builderEntry) and isServer() then obj:transmitModData() end
+-        if markMovable(obj, md.builderEntry) and isServer() then obj:transmitModData() end
 -        return
 -    end
--    local md = obj:getModData()
 -    if obj:getName() == nil then obj:setName(md.builderEntry) end -- 0.3.0 以前蓋的沒有名稱（見 thumpable 的 setName）
 -    if not sq then return end
 +        if markMovable(obj, id) and isServer() then obj:transmitModData() end
@@ -417,15 +416,27 @@
 -        end
 -    end
 -end
---- 特殊物件（IsoThumpable 都是）讀檔時另外列一份（IsoGridSquare.java:3232-3235），一般格子沒有
--Events.LoadGridsquare.Add(function(sq)
--    local list = sq:getSpecialObjects()
--    for i = 0, list:size() - 1 do MinidoracatBuilder.Place.migrate(list:get(i)) end
+--- 特殊物件（IsoThumpable 都是）讀檔時另外列一份（IsoGridSquare.java:3232-3235），一般格子沒有。伺服器與客戶端每載入一格都叫一次，
+--- 這兩個 Java 方法預先從方法表取出、以格子／清單為第一個引數直接呼叫：同一個方法、同樣的引數，只省下每次 sq:method() 的
+--- tableget／getmetatable 查表（KahluaThread.java:1113-1148,1195-1240；同 ServerPatch 的 MSP_VfeLoadSlim）。specialObjects 一定是
+--- ArrayList（IsoGridSquare.java:323，final）；兩個類別兩端都有暴露（LuaManager.java:1705,2186），取不到時照一般寫法
 +            return true, true, true
 +        end
 +    end
 +    return changed, false, true
 +end
++
+ local squareMethods = __classmetatables and IsoGridSquare and __classmetatables[IsoGridSquare.class]
+ local listMethods = __classmetatables and ArrayList and __classmetatables[ArrayList.class]
+ local getSpecialObjects = squareMethods and squareMethods.__index.getSpecialObjects
+     or function(sq) return sq:getSpecialObjects() end
+ local listSize = listMethods and listMethods.__index.size or function(list) return list:size() end
+-Events.LoadGridsquare.Add(function(sq)
+-    local list = getSpecialObjects(sq)
+-    local n = listSize(list)
+-    if n == 0 then return end
+-    local migrate = MinidoracatBuilder.Place.migrate
+-    for i = 0, n - 1 do migrate(list:get(i)) end
 +
 +local CHUNK_AREA = CHUNK_SIZE * CHUNK_SIZE
 +
@@ -522,8 +533,8 @@
 +            finishChunkScan(job)
 +        else
 +            job.square = sq
-+            local objects = sq:getSpecialObjects()
-+            local size = objects:size()
++            local objects = getSpecialObjects(sq)
++            local size = listSize(objects)
 +            if job.size and job.size ~= size then job.index = 0 end
 +            job.size = size
 +            local changed, cornerChanged

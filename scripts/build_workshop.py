@@ -108,8 +108,8 @@ def build_package(generated, output):
                 raise ValueError(f"Packaged Lua differs from the tested source at {installed}")
         for companion, settings in project["mods"].items():
             info = mod_info(version_layer(mods / companion))
-            if (info.get("id"), info.get("require"), info.get("versionMin")) != (
-                companion, settings["require"], settings.get("versionMin")
+            if (info.get("id"), info.get("require"), info.get("versionMin"), info.get("loadModAfter")) != (
+                companion, settings["require"], settings.get("versionMin"), settings.get("loadModAfter")
             ):
                 raise ValueError(f"Packaged {companion} mod.info has unexpected metadata")
         promote(package, destination)

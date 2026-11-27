@@ -9,7 +9,26 @@
      local opening = {}
      for _, e in ipairs(edges) do
          if e.open then
-@@ -123,7 +123,7 @@
+@@ -103,7 +103,17 @@
+     return removed
+ end
+ 
+-function aparosa_BD_Adopt.apply(x, y, z, character)
++local function logAdoptTiming(x, y, z, applyMs, publicationMs, timing)
++    if applyMs + publicationMs >= 100 then
++        print(string.format("[BasementDig] slow adopt x=%d y=%d z=%d applyMs=%d roomRegistrationMs=%d"
++            .. " dirtEdgesMs=%d neighborhoodRecalcMs=%d publicationWorkMs=%d",
++            x, y, z, applyMs, timing.room, timing.edges, timing.recalc, publicationMs))
++    end
++end
++
++function aparosa_BD_Adopt.apply(x, y, z, character, checkpoint, timing)
++    if checkpoint and not timing then timing = {} end
++    local started = checkpoint and getTimestampMs()
+     local ok, record = aparosa_BD_Adopt.validate(x, y, z)
+     if not ok then
+         log(string.format("adopt refused x=%d y=%d z=%d: %s", x, y, z, tostring(record)))
+@@ -123,12 +133,13 @@
          record.owner = aparosa_BD_Owner.nameOf(character)
          table.insert(aparosa_BD_Rooms.saved(), record)
      end
@@ -18,31 +37,124 @@
      record.extra = record.extra or {}
      table.insert(record.extra, { x = x, y = y, adopted = true })
      aparosa_BD_Expand.joinOthers(record, others)
-@@ -158,7 +158,7 @@
+     -- 隣は本 mod の地下室か地図の部屋なので、重なりの検査を飛ばす（aparosa_BD_Rooms.registerRects の注）。
+     -- マス自体に部屋が無いことは validate で見ている
++    local registrationStart = timing and getTimestampMs()
+     local registered
+     if isNew then
+         registered = aparosa_BD_Rooms.registerRecord(record, true)
+@@ -148,17 +159,56 @@
          end
+         return false, "registration"
      end
-     log(string.format("adopt done x=%d y=%d z=%d dirt walls opened=%d", x, y, z, opened))
++    local edgesStart = timing and getTimestampMs()
+     local opened = openDirtEdges(x, y, z)
+-    for dx = -1, 1 do
+-        for dy = -1, 1 do
+-            local s2 = getCell():getGridSquare(x + dx, y + dy, z)
+-            if s2 then
+-                s2:RecalcAllWithNeighbours(true)
++    local recalcStart = timing and getTimestampMs()
++    if timing then
++        timing.room = edgesStart - registrationStart
++        timing.edges = recalcStart - edgesStart
++        timing.recalc = 0
++    end
++    local applyBeforeRecalcMs = checkpoint and (recalcStart - started)
++    local nextSquare = 0
++    local function refreshNeighborhood()
++        local refreshStart = timing and getTimestampMs()
++        local cell = getCell()
++        local paused = false
++        -- The structure is already committed. Keep just a coordinate cursor for this extra refresh.
++        while cell and nextSquare < 9 do
++            local dx = math.floor(nextSquare / 3) - 1
++            local dy = nextSquare % 3 - 1
++            local square = cell:getGridSquare(x + dx, y + dy, z)
++            nextSquare = nextSquare + 1
++            if square then
++                square:RecalcAllWithNeighbours(true)
++                if checkpoint and checkpoint() then
++                    paused = true
++                    break
++                end
+             end
+         end
+-    end
+-    log(string.format("adopt done x=%d y=%d z=%d dirt walls opened=%d", x, y, z, opened))
 -    return true
++        if timing then timing.recalc = timing.recalc + getTimestampMs() - refreshStart end
++        return not paused
++    end
++
++    local function finish(recheckRecord)
++        log(string.format("adopt done x=%d y=%d z=%d dirt walls opened=%d", x, y, z, opened))
++        if checkpoint then
++            local start = getTimestampMs()
++            aparosa_BD_Sync.publishAdoption(record, recheckRecord)
++            logAdoptTiming(x, y, z, applyBeforeRecalcMs + timing.recalc, getTimestampMs() - start, timing)
++        end
++    end
++
++    if (checkpoint and checkpoint()) or not refreshNeighborhood() then
++        return true, nil, record, function()
++            if not refreshNeighborhood() then return false end
++            finish(true)
++            return true
++        end
++    end
++    finish(false)
 +    return true, nil, record
  end
  
  -- 併合の結果を頭上に出す（利用者 2026-10-02「可以在併入完成後加一個訊息提示例如：併入成功或失敗的訊息？」。
-@@ -236,9 +236,16 @@
+@@ -221,7 +271,7 @@
+ Events.OnFillWorldObjectContextMenu.Add(onFillMenu)
+ 
+ -- サーバー: 客からの「加えて」を受ける。客の言うマスをそのまま信じず、apply の中の validate で見直す
+-Events.OnClientCommand.Add(function(module, command, player, args)
++local function onAdoptCommand(module, command, player, args, checkpoint)
+     if module ~= COMMAND_MODULE or command ~= "adopt" or type(args) ~= "table" then
+         return
+     end
+@@ -236,11 +286,36 @@
          aparosa_BD_Adopt.notify(player, false, why)
          return
      end
 -    local ok, reason = aparosa_BD_Adopt.apply(x, y, z, player)
-+    local start = getTimestampMs()
-+    local ok, reason, record = aparosa_BD_Adopt.apply(x, y, z, player)
-     if ok then
+-    if ok then
 -        aparosa_BD_Sync.publish()
-+        local applied = getTimestampMs()
-+        aparosa_BD_Sync.publish(record)
-+        local finished = getTimestampMs()
-+        if finished - start >= 100 then
-+            print(string.format("[BasementDig] slow adopt x=%d y=%d z=%d applyMs=%d publishMs=%d",
-+                x, y, z, applied - start, finished - applied))
++    local start = not checkpoint and getTimestampMs()
++    local timing = {}
++    local ok, reason, record, continuation = aparosa_BD_Adopt.apply(x, y, z, player, checkpoint, timing)
++    if continuation then
++        local senderId = player:getOnlineID()
++        return function()
++            if not continuation() then return false end
++            if getPlayerByOnlineID(senderId) == player then
++                aparosa_BD_Adopt.notify(player, ok, reason)
++            end
++            return true
 +        end
++    end
++    if ok and not checkpoint then
++        local applied = getTimestampMs()
++        aparosa_BD_Sync.publishAdoption(record)
++        logAdoptTiming(x, y, z, applied - start, getTimestampMs() - applied, timing)
      end
      aparosa_BD_Adopt.notify(player, ok, reason)
- end)
+-end)
++end
++
++if not isClient() then
++    local library = aparosa_BD_Sync.deferredLibrary()
++    if library then
++        library.Commands.onClientCommandJob(COMMAND_MODULE, "adopt", function(module, command, player, args)
++            return onAdoptCommand(module, command, player, args, library.Jobs.checkpoint)
++        end, COMMAND_MODULE)
++    else
++        Events.OnClientCommand.Add(onAdoptCommand)
++    end
++end
+ 
+ return aparosa_BD_Adopt

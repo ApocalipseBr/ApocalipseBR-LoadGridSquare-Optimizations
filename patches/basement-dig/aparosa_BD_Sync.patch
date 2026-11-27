@@ -1,20 +1,76 @@
 --- a/media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua
 +++ b/media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua
-@@ -23,13 +23,15 @@
+@@ -23,13 +23,67 @@
  local KEY = aparosa_BD_Rooms.MODDATA_KEY
  
  -- サーバーで記録が変わった後に呼ぶ。全員へ送る
 -function aparosa_BD_Sync.publish()
-+-- Pass the surviving host record when it is the only record changed in place.
-+-- Clients still receive the complete snapshot so merged records disappear.
++local OWNER = "aparosa_BasementDig"
++local SNAPSHOT = "basement-records"
++local library
++
++function aparosa_BD_Sync.deferredLibrary()
++    if isServer() and getActivatedMods():contains("apocalipsebr_bplib") then
++        local candidate = library or require "ApocalipseBR_BPLib"
++        if candidate and candidate.Jobs and candidate.Jobs.checkpoint
++            and candidate.Commands and candidate.Commands.onClientCommandJob then
++            library = candidate
++            return library
++        end
++    end
++end
++
++local function transmitSnapshot()
++    local start = getTimestampMs()
++    ModData.transmit(KEY)
++    local elapsed = getTimestampMs() - start
++    if elapsed >= 100 then
++        print(string.format("[BasementDig] slow snapshot transmitMs=%d", elapsed))
++    end
++end
++
++-- 記録の写しを地下室のマスへも置く（落ちた時に記録だけが消えるのを戻すため。aparosa_BD_Mirror、todo B33）
++local function writeRecovery(changedRecord)
++    if aparosa_BD_Mirror then
++        aparosa_BD_Mirror.sync(changedRecord)
++    end
++end
++
 +function aparosa_BD_Sync.publish(changedRecord)
      if isServer() then
-         ModData.transmit(KEY)
-     end
-     -- 記録の写しを地下室のマスへも置く（落ちた時に記録だけが消えるのを戻すため。aparosa_BD_Mirror、todo B33）
-     if aparosa_BD_Mirror then
+-        ModData.transmit(KEY)
+-    end
+-    -- 記録の写しを地下室のマスへも置く（落ちた時に記録だけが消えるのを戻すため。aparosa_BD_Mirror、todo B33）
+-    if aparosa_BD_Mirror then
 -        aparosa_BD_Mirror.sync()
-+        aparosa_BD_Mirror.sync(changedRecord)
++        -- An immediate full snapshot already includes any previously completed adoption.
++        if library then library.Coalesce.cancel(SNAPSHOT, OWNER) end
++        transmitSnapshot()
++    end
++    writeRecovery(changedRecord)
++end
++
++local function isSavedRecord(record)
++    for _, current in ipairs(aparosa_BD_Rooms.saved()) do
++        if current == record then return true end
++    end
++    return false
++end
++
++function aparosa_BD_Sync.publishAdoption(record, recheckRecord)
++    if not library then
++        return aparosa_BD_Sync.publish(record)
++    end
++    -- The world change and recovery copies complete before the snapshot becomes eligible.
++    -- Other BasementDig entry points can change saved records while this job waits.
++    -- A removed record must not be recreated in square recovery data.
++    if not recheckRecord or isSavedRecord(record) then
++        writeRecovery(record)
++    end
++    local ticket = library.Coalesce.latest(SNAPSHOT, transmitSnapshot, 500, OWNER)
++    if not ticket then
++        -- Preserve the update when the shared queue is full.
++        transmitSnapshot()
      end
  end
  

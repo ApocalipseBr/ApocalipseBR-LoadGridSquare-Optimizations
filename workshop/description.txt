@@ -17,7 +17,7 @@ Patch baseline [b]1.11[/b].
 Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726]True Swimming by Harkwood[/url] ([b]TrueSwimming[/b]) and Build 42.20 or later. Enable [b]ApocalipseBR_TrueSwimming_fix[/b].
 
 [b]Minidoracat Build Anything[/b]
-Patch baseline [b]42.22.2-1.5.0[/b].
+Patch baseline [b]42.22.2-1.5.1[/b].
 [b]Before[/b] Loading a new area could make the game check older player-built objects for repairs all at once, even when there was little to fix.
 [b]Now[/b] Those checks are spread out as you play. The game remembers which areas have already been checked, so it can skip empty areas and go straight to known objects. Some repairs may finish shortly after you arrive. If you need to check your builds again, use [b]Reset Builder Migration Cache[/b] in the right-click menu in single-player or as a server admin.
 Requires [url=https://steamcommunity.com/sharedfiles/filedetails/?id=3830045886]Minidoracat Build Anything for B42[/url] ([b]MinidoracatBuilderFor42[/b]), its dependencies, and Build 42.22.2 or later. Enable [b]minidoracatbuilderfix[/b].

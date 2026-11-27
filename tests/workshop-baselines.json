@@ -24,9 +24,9 @@
       "mod_id": "MinidoracatBuilderFor42",
       "workshop_id": "3830045886",
       "reviewed_workshop_id": "3830045886",
-      "reviewed_modversion": "42.22.2-1.5.0",
+      "reviewed_modversion": "42.22.2-1.5.1",
       "overrides": {
-        "media/lua/shared/MinidoracatBuilder/Place.lua": "cde2fbb2198ac54aac1fa2b4ad9286453e41806abe0fc7f8baae56c4fcb74941"
+        "media/lua/shared/MinidoracatBuilder/Place.lua": "181957b5ecf83fb91273fbda94ca06d82a75b370fd949dd9fa9f43a7e25c9b04"
       },
       "patch_dir": "minidoracat-builder"
     },
@@ -40,7 +40,9 @@
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Ladder.lua": "18f18230163d096055c5f53ca05cadc4afd9fc2e67aa6add053f7457a58372bd",
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Mirror.lua": "f13df937cb0f616e05fe35cfbc41759292ddca67d99ac88cc2434eb934419f1a",
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Adopt.lua": "5a9270ffd2cf679ec3f252a3c402b34d86470fede200c148e0da7cc783a6b11a",
-        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua": "d7d86292360909dd3f6dd8af7e225ca964ae3699e87abbbbc49ef0446922c694"
+        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua": "d7d86292360909dd3f6dd8af7e225ca964ae3699e87abbbbc49ef0446922c694",
+        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Expand.lua": "51f1792416ea2bdc696d668a4b8da1c94199800657abf9525c1247fad1b545ea",
+        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Entity.lua": "ecb7a877a4396ce3bfa249f6511a5df6038ada77530d0286e346a67e63da985d"
       },
       "patch_dir": "basement-dig"
     }

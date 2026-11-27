@@ -11,7 +11,35 @@ local dependencies = {
     ZExtent = true, Build = true, Expand = true, SwitchMove = true, Sync = true,
     Sandbox = true, Owner = true,
 }
+local queuedCommands, pendingSnapshot = {}, nil
+local overBudget, checkpointChecks = false, 0
+local library = {
+    Commands = { onClientCommandJob = function(module, command, handler, owner)
+        assert(module == "aparosa_BasementDig" and command == "adopt" and owner == module)
+        Events.OnClientCommand.Add(function(receivedModule, receivedCommand, player, args)
+            if receivedModule == module and receivedCommand == command then
+                queuedCommands[#queuedCommands + 1] = function() return handler(module, command, player, args) end
+            end
+        end)
+    end },
+    Jobs = { checkpoint = function()
+        checkpointChecks = checkpointChecks + 1
+        return overBudget
+    end },
+    Coalesce = {
+        latest = function(key, callback, delayMs, owner)
+            assert(key == "basement-records" and delayMs == 500 and owner == "aparosa_BasementDig")
+            pendingSnapshot = callback
+            return true
+        end,
+        cancel = function(key, owner)
+            assert(key == "basement-records" and owner == "aparosa_BasementDig")
+            pendingSnapshot = nil
+        end,
+    },
+}
 require = function(name)
+    if name == "ApocalipseBR_BPLib" then return library end
     local module = name:match("^aparosa_BasementDig/aparosa_BD_(%w+)$")
     assert(dependencies[module], name)
 end
@@ -143,17 +171,38 @@ local merged = { ax = 17, ay = 0, z = -1 }
 local unrelated = { ax = 24, ay = 0, z = -1 }
 saved[2], saved[3] = merged, unrelated
 local recalcs, transmissions, frozen = 0, 0, 0
+local now, slowAdoptLog = 1234, nil
 local lookup = getCell().getGridSquare
-expansion.RecalcAllWithNeighbours = function() recalcs = recalcs + 1 end
+local recalcOrder = {}
+local function refresh(label)
+    return function()
+        recalcs = recalcs + 1
+        recalcOrder[#recalcOrder + 1] = label
+        now = now + 11
+    end
+end
+local west = { RecalcAllWithNeighbours = function() error("reused a square from a previous tick") end }
+local east = { RecalcAllWithNeighbours = refresh("east") }
+expansion.RecalcAllWithNeighbours = refresh("center")
 expansion.getFloor = function() return true end
-getCell = function() return { getGridSquare = lookup } end
+getCell = function()
+    return { getGridSquare = function(cell, x, y, z)
+        if y == 0 and z == -1 then
+            if x == 15 then return west end
+            if x == 17 then return east end
+        end
+        return lookup(cell, x, y, z)
+    end }
+end
 getWorld = function()
     return { getMetaGrid = function() return { getRoomAt = function() return nil end } end }
 end
-getTimestampMs = function() return 1234 end
+getTimestampMs = function() return now end
+print = function(message) slowAdoptLog = message end
 aparosa_BD_Rooms.MODDATA_KEY = "basement-records"
 aparosa_BD_Rooms.growRecord = function(record, tiles)
     assert(record == host and #tiles == 1 and tiles[1].x == 16 and tiles[1].y == 0)
+    now = now + 101
     return true
 end
 aparosa_BD_Expand.findHost = function() return host end
@@ -163,7 +212,10 @@ aparosa_BD_Expand.joinOthers = function(record, others)
     record.joined = others
     table.remove(saved, 2)
 end
-aparosa_BD_Expand.localEdges = function() return {} end
+aparosa_BD_Expand.localEdges = function()
+    now = now + 7
+    return {}
+end
 aparosa_BD_Expand.withFrozenIndex = function(fn, ...)
     frozen = frozen + 1
     return fn(...)
@@ -177,7 +229,11 @@ aparosa_BD_Sandbox = {
     modEnabled = function() return true end,
     allowAdopt = function() return true end,
 }
-local player = {}
+local player = { getOnlineID = function() return 7 end }
+getPlayerByOnlineID = function(id)
+    assert(id == 7)
+    return player
+end
 local nearby, withinLimit, notice = false, false, nil
 local limitNotice = "IGUI_aparosa_BasementDig_Reason_LimitTiles"
 aparosa_BD_Owner = { canGrow = function(character, record)
@@ -191,6 +247,10 @@ aparosa_BD_Check.notifyFailure = function(character, key)
     notice = key
 end
 aparosa_BD_Build.SPRITE.dirt.wall = {}
+local libraryEnabled = false
+getActivatedMods = function()
+    return { contains = function(_, modId) return libraryEnabled and modId == "apocalipsebr_bplib" end }
+end
 ModData = { transmit = function(name)
     assert(name == aparosa_BD_Rooms.MODDATA_KEY and #saved == 2 and saved[2] == unrelated)
     transmissions = transmissions + 1
@@ -199,16 +259,53 @@ load("Sync")
 load("Adopt")
 local command = { x = 16, y = 0, z = -1 }
 fire("OnClientCommand", "aparosa_BasementDig", "adopt", player, command)
+assert(#queuedCommands == 0 and notice == "IGUI_aparosa_BasementAdopt_Far", "the original path works without the library")
+Events.OnClientCommand.Remove(Events.OnClientCommand.callbacks[1])
+notice, libraryEnabled = nil, true
+load("Adopt")
+assert(#Events.OnClientCommand.callbacks == 1, "the optional library replaces the original listener")
+fire("OnClientCommand", "aparosa_BasementDig", "adopt", player, command)
+assert(#queuedCommands == 1 and notice == nil, "delivery only queues the handler")
+table.remove(queuedCommands, 1)()
 assert(not host.extra and transmissions == 0 and #copied == 0 and notice == "IGUI_aparosa_BasementAdopt_Far")
 nearby = true
 fire("OnClientCommand", "aparosa_BasementDig", "adopt", player, command)
+table.remove(queuedCommands, 1)()
 assert(not host.extra and #saved == 3 and transmissions == 0 and #copied == 0 and notice == limitNotice,
     "a floor rejected by the owner limit cannot be merged, published or mirrored")
-withinLimit = true
+withinLimit, overBudget = true, true
 fire("OnClientCommand", "aparosa_BasementDig", "adopt", player, command)
-assert(transmissions == 1 and #copied == 1 and copied[1] == host and frozen == 2 and recalcs == 1)
-assert(host.extra[1].adopted and anchor:getModData()[key].mirrorVer == 1234)
+assert(not pendingSnapshot and transmissions == 0 and not host.extra)
+local resumeAdoption = table.remove(queuedCommands, 1)()
+assert(checkpointChecks == 1 and type(resumeAdoption) == "function")
+assert(host.extra[1].adopted and #saved == 2 and recalcs == 0, "the first pause follows the structural edit")
+assert(not pendingSnapshot and transmissions == 0 and #copied == 0 and notice == limitNotice)
+west = { RecalcAllWithNeighbours = refresh("west") }
+now = now + 1000 -- Tick gaps must not be charged to any phase of adoption.
+assert(resumeAdoption() == false and table.concat(recalcOrder, ",") == "west")
+assert(not pendingSnapshot and #copied == 0 and notice == limitNotice)
+now = now + 1000
+assert(resumeAdoption() == false and table.concat(recalcOrder, ",") == "west,center")
+assert(not pendingSnapshot and #copied == 0 and notice == limitNotice)
+now, overBudget = now + 1000, false
+assert(resumeAdoption() == true, "the continuation completes the original command job")
+assert(table.concat(recalcOrder, ",") == "west,center,east")
+assert(pendingSnapshot and transmissions == 0 and #copied == 1 and copied[1] == host and frozen == 2 and recalcs == 3)
+assert(host.extra[1].adopted and anchor:getModData()[key].mirrorVer == now)
+assert(slowAdoptLog and slowAdoptLog:find(
+    "applyMs=141 roomRegistrationMs=101 dirtEdgesMs=7 neighborhoodRecalcMs=33 publicationWorkMs=0", 1, true))
 assert(expansion:getModData()[key].joined[1].ax == merged.ax and unrelated.mirrorVer == nil)
 assert(notice == "IGUI_aparosa_BasementAdopt_Done")
+aparosa_BD_Sync.publishAdoption(merged, true)
+assert(#copied == 1, "a removed record cannot gain a new recovery copy after yielding")
+aparosa_BD_Sync.publishAdoption(host)
+assert(pendingSnapshot and transmissions == 0 and #copied == 1)
+local send = pendingSnapshot
+pendingSnapshot = nil
+send()
+assert(transmissions == 1, "completed adoptions share one full broadcast")
+aparosa_BD_Sync.publishAdoption(host)
+assert(pendingSnapshot)
 aparosa_BD_Sync.publish()
-assert(transmissions == 2 and #copied == 2 and copied[2] == unrelated, "other publishers still scan all records")
+assert(not pendingSnapshot and transmissions == 2 and #copied == 2 and copied[2] == unrelated,
+    "immediate publishers still scan all records and supersede the pending snapshot")

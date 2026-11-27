@@ -4,6 +4,18 @@ IsoFlagType, IsoObjectType, GridSquareEdgeFacingDirection = {}, {}, {}
 local client = true
 isClient = function() return client end
 local cache = load_patch(mod, "media/lua/shared/MinidoracatBuilderFix/MigrationCache.lua")
+local squareMethodCalls, listMethodCalls = 0, 0
+IsoGridSquare, ArrayList = { class = {} }, { class = {} }
+__classmetatables = {
+    [IsoGridSquare.class] = { __index = { getSpecialObjects = function(square)
+        squareMethodCalls = squareMethodCalls + 1
+        return square:getSpecialObjects()
+    end } },
+    [ArrayList.class] = { __index = { size = function(list)
+        listMethodCalls = listMethodCalls + 1
+        return list:size()
+    end } },
+}
 require = function(name)
     if name == "MinidoracatBuilderFix/MigrationCache" then return cache end
     assert(name == "MinidoracatBuilder/Entry" or name == "MinidoracatBuilder/Cost", name)
@@ -95,6 +107,7 @@ fire("LoadChunk", chunk)
 assert(visits == 1 and rechecks == 0, "LoadChunk only checks the cache anchor")
 fire("OnTick")
 assert(rechecks == 1 and materials["Base.Plank"] == 2, "keep the refund before the ledger loads")
+assert(squareMethodCalls == 1 and listMethodCalls == 1, "reuse the upstream Java method lookups in the deferred scan")
 assert(not cache.lookup(cache.index(), square, 0, 0), "unfinished migrations cannot become cache hits")
 
 local ledger, writes = nil, 0
