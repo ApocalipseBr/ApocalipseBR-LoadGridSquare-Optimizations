@@ -22,11 +22,47 @@
  
  aparosa_BD_Mirror = aparosa_BD_Mirror or {}
  
-@@ -133,53 +134,98 @@
-     end
+@@ -114,7 +115,16 @@
  end
  
+ -- 中身が変わった記録の写しを、錨と全てのマスへ置く（サーバーと単機）
+-function aparosa_BD_Mirror.sync()
++local function syncRecord(cell, record, now)
++    local s = shape(record)
++    if mirrored[record] ~= s then
++        record.mirrorVer = now
++        writeCopies(cell, record, false)
++        mirrored[record] = s
++    end
++end
++
++function aparosa_BD_Mirror.sync(changedRecord)
+     if isClient() or not ready then
+         return
+     end
+@@ -123,63 +133,107 @@
+         return
+     end
+     local now = getTimestampMs()
++    if changedRecord then
++        syncRecord(cell, changedRecord, now)
++        return
++    end
+     for _, record in ipairs(aparosa_BD_Rooms.saved()) do
+-        local s = shape(record)
+-        if mirrored[record] ~= s then
+-            record.mirrorVer = now
+-            writeCopies(cell, record, false)
+-            mirrored[record] = s
+-        end
+-    end
+-end
+-
 --- 読込の後の 1 回目: 今の記録を「写した形」として覚え、写しの無いマスへだけ置く（版は変えない。写しの無い前の世界は版を付ける）
++        syncRecord(cell, record, now)
++    end
++end
++
 +-- Keep an unversioned legacy record at version zero so an expansion copy
 +-- discovered later can still supersede it.
  local function baseline()
@@ -148,7 +184,7 @@
              local live = aparosa_BD_Expand.findRecordAt(x, y, z)
              if not live then
                  local record = copy(rec)
-@@ -208,37 +254,60 @@
+@@ -208,37 +262,60 @@
              return true
          end)
          log(string.format("restored records registered: %d / %d", ok, #changed))

@@ -1,5 +1,6 @@
-local client = true
+local client, server = true, false
 isClient = function() return client end
+isServer = function() return server end
 aparosa_BD_Rooms = { log = function() end }
 aparosa_BD_Check = { BOTTOM = -32 }
 local function load(name)
@@ -8,6 +9,7 @@ end
 local dependencies = {
     Edge = true, Lights = true, Layout = true, Rooms = true, Check = true,
     ZExtent = true, Build = true, Expand = true, SwitchMove = true, Sync = true,
+    Sandbox = true, Owner = true,
 }
 require = function(name)
     local module = name:match("^aparosa_BasementDig/aparosa_BD_(%w+)$")
@@ -133,3 +135,80 @@ fire("LoadChunk", chunkFor(expansion))
 tick(30)
 assert(#saved == 1 and saved[1].mirrorVer == 2 and saved[1].variant == "expanded")
 assert(batches == 2 and publishes == 2 and retries == 2 and #Events.OnTick.callbacks == existingWorkers)
+
+-- The real command keeps the full network snapshot and mirrors only the surviving record.
+server = true
+local host = saved[1]
+local merged = { ax = 17, ay = 0, z = -1 }
+local unrelated = { ax = 24, ay = 0, z = -1 }
+saved[2], saved[3] = merged, unrelated
+local recalcs, transmissions, frozen = 0, 0, 0
+local lookup = getCell().getGridSquare
+expansion.RecalcAllWithNeighbours = function() recalcs = recalcs + 1 end
+expansion.getFloor = function() return true end
+getCell = function() return { getGridSquare = lookup } end
+getWorld = function()
+    return { getMetaGrid = function() return { getRoomAt = function() return nil end } end }
+end
+getTimestampMs = function() return 1234 end
+aparosa_BD_Rooms.MODDATA_KEY = "basement-records"
+aparosa_BD_Rooms.growRecord = function(record, tiles)
+    assert(record == host and #tiles == 1 and tiles[1].x == 16 and tiles[1].y == 0)
+    return true
+end
+aparosa_BD_Expand.findHost = function() return host end
+aparosa_BD_Expand.othersAround = function() return { merged } end
+aparosa_BD_Expand.joinOthers = function(record, others)
+    assert(record == host and others[1] == merged)
+    record.joined = others
+    table.remove(saved, 2)
+end
+aparosa_BD_Expand.localEdges = function() return {} end
+aparosa_BD_Expand.withFrozenIndex = function(fn, ...)
+    frozen = frozen + 1
+    return fn(...)
+end
+local copied = {}
+aparosa_BD_Expand.tilesOf = function(record)
+    copied[#copied + 1] = record
+    return record.extra or {}
+end
+aparosa_BD_Sandbox = {
+    modEnabled = function() return true end,
+    allowAdopt = function() return true end,
+}
+local player = {}
+local nearby, withinLimit, notice = false, false, nil
+local limitNotice = "IGUI_aparosa_BasementDig_Reason_LimitTiles"
+aparosa_BD_Owner = { canGrow = function(character, record)
+    assert(character == player and record == host)
+    return withinLimit, limitNotice
+end }
+aparosa_BD_Check.isBasementLevel = function(z) return z == -1 end
+aparosa_BD_Check.requesterNear = function() return nearby, "far" end
+aparosa_BD_Check.notifyFailure = function(character, key)
+    assert(character == player)
+    notice = key
+end
+aparosa_BD_Build.SPRITE.dirt.wall = {}
+ModData = { transmit = function(name)
+    assert(name == aparosa_BD_Rooms.MODDATA_KEY and #saved == 2 and saved[2] == unrelated)
+    transmissions = transmissions + 1
+end }
+load("Sync")
+load("Adopt")
+local command = { x = 16, y = 0, z = -1 }
+fire("OnClientCommand", "aparosa_BasementDig", "adopt", player, command)
+assert(not host.extra and transmissions == 0 and #copied == 0 and notice == "IGUI_aparosa_BasementAdopt_Far")
+nearby = true
+fire("OnClientCommand", "aparosa_BasementDig", "adopt", player, command)
+assert(not host.extra and #saved == 3 and transmissions == 0 and #copied == 0 and notice == limitNotice,
+    "a floor rejected by the owner limit cannot be merged, published or mirrored")
+withinLimit = true
+fire("OnClientCommand", "aparosa_BasementDig", "adopt", player, command)
+assert(transmissions == 1 and #copied == 1 and copied[1] == host and frozen == 2 and recalcs == 1)
+assert(host.extra[1].adopted and anchor:getModData()[key].mirrorVer == 1234)
+assert(expansion:getModData()[key].joined[1].ax == merged.ax and unrelated.mirrorVer == nil)
+assert(notice == "IGUI_aparosa_BasementAdopt_Done")
+aparosa_BD_Sync.publish()
+assert(transmissions == 2 and #copied == 2 and copied[2] == unrelated, "other publishers still scan all records")

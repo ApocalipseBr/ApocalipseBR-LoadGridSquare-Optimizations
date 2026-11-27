@@ -106,20 +106,22 @@ def upstream_files(workshop_root, companion, spec, reviewed):
 
 
 def generate_companion(workshop_root, companion, *, reviewed):
-    from lupa.lua51 import LuaError
+    from lupa.lua51 import LuaError, LuaRuntime
     from tests.lua_runner import run_lua_spec
 
     spec = GENERATED[companion]
     label, original, authored = upstream_files(workshop_root, companion, spec, reviewed)
     generated = {}
+    compiler = LuaRuntime(encoding=None, register_eval=False, register_builtins=False, max_memory=32 * 1024 * 1024)
     for path, baseline in spec["overrides"].items():
         file = original.get(path.lower())
         if file is None or not file.as_posix().endswith("/" + path):
             raise ValueError(f"{label}: missing exact upstream path {path}")
         source = file.read_bytes()
         observed = hashlib.sha256(source.replace(b"\r\n", b"\n")).hexdigest()
+        print(f"SOURCE {label}: {path} SHA-256 {observed}")
         if observed != baseline:
-            print(f"INFO {label}: {path} changed from reviewed SHA-256 {baseline} to {observed}")
+            print(f"INFO {label}: {path} differs from reviewed SHA-256 {baseline}")
         try:
             if companion == SWIMMING:
                 generated[path] = patch_source(source)
@@ -128,6 +130,10 @@ def generate_companion(workshop_root, companion, *, reviewed):
                 generated[path] = apply_diff(source, patch.read_bytes())
         except (OSError, ValueError) as error:
             raise ValueError(f"{label}: {path}: {error}. Review patches/{spec['patch_dir']}.") from error
+        try:
+            compiler.compile(generated[path], name=path.encode(), mode="t")
+        except (LuaError, MemoryError) as error:
+            raise ValueError(f"{label}: {path}: generated Lua failed to compile: {error}") from error
 
     def read_patch(requested_companion, path):
         if requested_companion != companion:
@@ -137,12 +143,11 @@ def generate_companion(workshop_root, companion, *, reviewed):
         return authored[path.lower()].read_bytes()
 
     for test in GENERATED_TESTS[companion]:
-        if reviewed and test == "true_swimming_dock.lua":
-            continue  # The reviewed 1.9 source predates dock support.
         try:
             run_lua_spec(test, read_patch, restrict=True)
         except (LuaError, MemoryError) as error:
             raise ValueError(f"{label}: {test} failed on generated Lua: {error}") from error
+        print(f"PASS {label}: {test}")
 
     print(f"PASS {label}: generated and tested {len(generated)} Lua override(s)")
     return {Path(companion, version_layer(ROOT / companion).name, path): source for path, source in generated.items()}

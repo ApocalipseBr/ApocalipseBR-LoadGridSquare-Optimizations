@@ -8,7 +8,7 @@ Check upstream mod metadata, compare the overridden file with the current upstre
 
 ## True Swimming Workshop identity
 
-The 2026-11-22 telemetry and local source comparison identify the installed copy under Workshop ID `3691681426`. The distribution description links [Harkwood's True Swimming listing, 3802372726](https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726). The companion declares the internal mod ID `TrueSwimming`. The reviewed mode can use an archived 1.9 copy. The current local cache no longer contains True Swimming under that item ID. The live build uses the public Workshop listing.
+The 2026-11-22 telemetry and local source comparison identify the installed copy under Workshop ID `3691681426`. The distribution description links [Harkwood's True Swimming listing, 3802372726](https://steamcommunity.com/sharedfiles/filedetails/?id=3802372726). The companion declares the internal mod ID `TrueSwimming`. The current baseline uses the public item at version 1.11 and records the hash from the installed Workshop cache.
 
 ## True Swimming 1.11 drift
 

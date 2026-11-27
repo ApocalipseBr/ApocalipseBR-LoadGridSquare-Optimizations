@@ -24,6 +24,8 @@ jobs:
           node-version: '24'
           cache: npm
       - run: python -m pip install -r tests/requirements.txt
+      - name: Run offline regression tests
+        run: python -B -m unittest discover -s tests -v
       - run: npm ci --ignore-scripts
       - name: Download, test and build the Workshop package
         shell: pwsh
@@ -33,7 +35,12 @@ jobs:
           $output = Join-Path $env:RUNNER_TEMP 'workshop-output'
           Invoke-WebRequest 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip' -OutFile $zip
           Expand-Archive -LiteralPath $zip -DestinationPath $dir
-          python -B -m scripts.build_workshop --steamcmd (Join-Path $dir 'steamcmd.exe') --check-upstream --output $output
+          python -B -m scripts.build_workshop --steamcmd (Join-Path $dir 'steamcmd.exe') --check-upstream --output $output --benchmark-output (Join-Path $env:RUNNER_TEMP 'mocked-lua-benchmark.json')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mocked-lua-benchmark
+          path: ${{ runner.temp }}/mocked-lua-benchmark.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: workshop-package

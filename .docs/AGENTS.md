@@ -22,6 +22,9 @@ Use lowercase kebab-case filenames and relative Markdown links. Keep this index 
 
 - [2026-11-22 dedicated server startup checks](reports/2026-11-22-server-startup-checks.md) records the seven successful startup checks and their coverage.
 
+- [2026-11-27 Workshop refresh and basement adoption](reports/2026-11-27-workshop-refresh-and-basement-adoption.md) records the installed revisions, the floor-adoption spike and the validation of the refreshed package.
+- [2026-11-27 Basement Building performance report for the maintainer](reports/2026-11-27-basementdig-telemetry-for-author.md) explains the 30.027-second window, the worst tick, JVM counters and the adoption refactor.
+
 ## Features
 
 - [Map-load compatibility patches](features/map-load-compatibility-patches.md) documents LiuDing Tiles, True Swimming, MinidoracatBuilder and BasementDig.

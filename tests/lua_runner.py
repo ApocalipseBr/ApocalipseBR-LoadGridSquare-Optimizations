@@ -5,7 +5,7 @@ from lupa.lua51 import LuaRuntime
 LUA_TESTS = Path(__file__).resolve().parent / "lua"
 
 
-def run_lua_spec(spec, read_patch, *, restrict=False):
+def run_lua_spec(spec, read_patch, *, restrict=False, arguments=()):
     lua = LuaRuntime(encoding=None, register_eval=False, register_builtins=False, max_memory=32 * 1024 * 1024)
     if restrict:
         # The fixture exposes mocked game APIs. Downloaded Lua gets no OS,
@@ -23,4 +23,6 @@ def run_lua_spec(spec, read_patch, *, restrict=False):
 
     lua.execute((LUA_TESTS / "harness.lua").read_bytes())
     # The trusted spec can load several files. Source chunks never see the Python loader.
-    lua.execute(b"local load_patch = ...\n" + (LUA_TESTS / spec).read_bytes(), load_patch, name=spec.encode())
+    return lua.execute(
+        b"local load_patch = ...\n" + (LUA_TESTS / spec).read_bytes(), load_patch, *arguments, name=spec.encode(),
+    )

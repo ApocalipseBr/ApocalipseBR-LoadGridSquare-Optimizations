@@ -123,28 +123,36 @@ def main():
     source.add_argument("--workshop-root", type=Path, help="Existing steamapps/workshop/content/108600 directory")
     parser.add_argument("--reviewed", action="store_true", help="Use reviewed item IDs in an existing cache")
     parser.add_argument("--check-upstream", action="store_true", help="Also check the checked-in LiuDing Tiles override baseline")
+    parser.add_argument("--benchmark-output", type=Path, help="Run mocked before/after benchmarks and write their JSON results")
     parser.add_argument("--output", type=Path, help="Parent directory of the generated Workshop package")
     args = parser.parse_args()
     if args.reviewed and not args.workshop_root:
         parser.error("--reviewed requires --workshop-root")
 
     other_mods = BASELINES["mods"].keys() - GENERATED.keys()
+    check_upstream = args.check_upstream or args.benchmark_output is not None
     try:
         workshop = args.workshop_root
         steamcmd = args.steamcmd or os.environ.get("STEAMCMD") or shutil.which("steamcmd")
         provision = bundled_steamcmd() if not workshop and not steamcmd else nullcontext(steamcmd)
         with provision as executable:
             if workshop is None:
-                ids = None if args.check_upstream else [spec["workshop_id"] for spec in GENERATED.values()]
+                ids = None if check_upstream else [spec["workshop_id"] for spec in GENERATED.values()]
                 workshop = download(Path(executable), ids=ids)
             workshop = workshop.resolve()
             generated = {}
             for companion in GENERATED:
                 generated.update(generate_companion(workshop, companion, reviewed=args.reviewed))
-            if args.check_upstream:
+            if check_upstream:
                 errors = check(workshop, reviewed=args.reviewed, companions=other_mods)
                 if errors:
                     raise ValueError("\n".join(errors))
+            if args.benchmark_output:
+                from tests.mock_benchmark import collect, write_report
+
+                report = collect(workshop, generated, reviewed=args.reviewed)
+                write_report(report, args.benchmark_output, os.environ.get("GITHUB_STEP_SUMMARY"))
+                print(f"Mocked Lua benchmark report ready at {args.benchmark_output}")
         destination = build_package(generated, (args.output or configured_output()).resolve())
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"Workshop build failed: {error}")

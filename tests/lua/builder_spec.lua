@@ -49,7 +49,12 @@ local floor = {
     hasModData = function() return true end,
     getModData = function() return { builderEntry = "floor" } end,
     getName = function() return "floor" end,
-    getSprite = function() return { getName = function() return "floor" end } end,
+    getSprite = function()
+        return {
+            getName = function() return "floor" end,
+            getProperties = function() return { has = function() return false end } end,
+        }
+    end,
     isFloor = function() return true end,
     getThumpDmg = function() return 8 end,
     getContainerCount = function() return 0 end,
@@ -92,11 +97,14 @@ fire("OnTick")
 assert(rechecks == 1 and materials["Base.Plank"] == 2, "keep the refund before the ledger loads")
 assert(not cache.lookup(cache.index(), square, 0, 0), "unfinished migrations cannot become cache hits")
 
-local ledger
+local ledger, writes = nil, 0
 MinidoracatBuilder.Floors = {
     instance = true,
     get = function() return ledger end,
-    put = function(_, refund) ledger = { s = "floor", i = { ["Base.Plank"] = refund["Base.Plank"] } } end,
+    put = function(_, refund)
+        writes = writes + 1
+        ledger = { s = "floor", i = { ["Base.Plank"] = refund["Base.Plank"] } }
+    end,
 }
 fire("OnTick")
 assert(ledger.i["Base.Plank"] == 2 and not materials["Base.Plank"], "transfer the deferred refund exactly once")
@@ -109,7 +117,30 @@ fire("LoadChunk", chunk)
 fire("OnTick")
 assert(visits == 2 and rechecks == 3, "cache hits visit only the anchor and candidate and still recheck regions")
 
--- Builder 1.3.0 treats the wall overlay as the sliding door's only frame.
+ledger, writes, materials["Base.Plank"] = nil, 0, 3
+fire("LoadChunk", chunk)
+assert(#Events.OnTick.callbacks == 1, "the legacy floor still has a pending chunk scan")
+assert(Place.refundOf(floor)["Base.Plank"] == 3, "a dismantle can read the refund before the migration worker runs")
+fire("OnTick")
+assert(Place.refundOf(floor) == ledger.i and writes == 1 and not materials["Base.Plank"],
+    "the migration worker and repeated refund lookups must not transfer materials twice")
+ledger.s = "different_floor"
+assert(Place.refundOf(floor) == nil, "a stale ledger entry must not pay out for a replacement floor")
+
+local vanillaFloor = {
+    getSquare = function() return square end,
+    getSprite = function() return nil end,
+    hasModData = function() return false end,
+    isFloor = function() return true end,
+}
+local getLedgerEntry = MinidoracatBuilder.Floors.get
+MinidoracatBuilder.Floors.get = function() return nil end
+isServer = function() return false end
+assert(Place.refundOf(vanillaFloor) == nil, "ordinary floors have no buildMaterials methods")
+isServer = function() return true end
+MinidoracatBuilder.Floors.get = getLedgerEntry
+
+-- Builder treats the wall overlay as the sliding door's only frame.
 IsoFlagType.cutN, IsoFlagType.WallSE = "cutN", "WallSE"
 Rules.SLIDING_FRAME = "sliding"
 local prop = {

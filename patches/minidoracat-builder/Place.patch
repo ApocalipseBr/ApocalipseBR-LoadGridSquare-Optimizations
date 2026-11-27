@@ -9,10 +9,10 @@
  local Place = MinidoracatBuilder.Place or {}
  MinidoracatBuilder.Place = Place
  
-@@ -1042,6 +1044,31 @@
- -- 不收料所以退空表。車庫門、雙開門照伺服器帳本那一組的一筆（Place.build；obj 是哪一片都行），坡道照頭片那格那一筆
- -- （Place.rampOrigin 照圖與位置推頭片格，不看記號；某片被別的方式移走後那一筆是空表，見 Place.onAboutToBeRemoved）。
- -- 都沒有回 nil。
+@@ -1085,6 +1087,31 @@
+     return { e = e, x = sq:getX(), y = sq:getY(), z = sq:getZ(), w = #list, garage = garage, north = a:isNorth(), objects = list }
+ end
+ 
 +local function wipe(t)
 +    local keys = {}
 +    for k in pairs(t) do keys[#keys + 1] = k end
@@ -38,25 +38,25 @@
 +    return true
 +end
 +
- function Place.refundOf(obj)
-     local door = Place.doorAnchor(obj)
-     if door then
-@@ -1068,18 +1095,18 @@
-     if not (sq and sq:getZ() <= 0 and obj:isFloor()) then return obj:getBuildMaterials() end
+ -- 拆了退什麼（Server.dismantle 與伺服器的原地替換讀，只在伺服器）：燈、家電（Place.keyed）照伺服器帳本；一樓以下的地板照
+ -- 地板帳本，現在的圖和蓋的時候一樣、這一格只有它一片地板才退；其他照 buildMaterials。單機讀檔時帳本建好之前讀進來、
+ -- 還沒搬的舊地板照 buildMaterials（Place.migrate）。本工具挖的水面也照地板帳本認（Place.dig 記的那筆，圖要一樣），
+@@ -1118,18 +1145,19 @@
+     if not (sq and sq:getZ() <= 0 and obj:isFloor()) then return thump and obj:getBuildMaterials() or nil end
      local Floors = MinidoracatBuilder.Floors
      local e = Floors and Floors.get(obj)
-+    if not e and Floors and Floors.instance
-+        and instanceof(obj, "IsoThumpable") and obj:hasModData() then
++    if not e and Floors and Floors.instance and thump and obj:hasModData() then
 +        local id = obj:getModData().builderEntry
-+        if id then migrateFloorRefund(obj, id, obj:getSprite()) end
-+        e = Floors.get(obj)
++        if id then
++            migrateFloorRefund(obj, id, obj:getSprite())
++            e = Floors.get(obj)
++        end
 +    end
      if e then
          local spr = obj:getSprite()
          return spr and e.s == spr:getName() and not otherFloor(sq, obj) and e.i or nil
      end
--    if isServer() or not obj:hasBuildMaterials() then return nil end -- 專用伺服器讀格子前就建好帳本，都搬過了
-+    if isServer() or not obj:hasBuildMaterials() then return nil end -- Dedicated servers require a valid ledger entry.
+     if isServer() or not thump or not obj:hasBuildMaterials() then return nil end -- 專用伺服器讀格子前就建好帳本，都搬過了
      return obj:getBuildMaterials()
 -end
 -
@@ -67,7 +67,7 @@
  end
  
  -- 退料寫在伺服器建立的 Java 欄位 buildMaterials（原版拆解讀它），一樓以下的地板改記在地板帳本（groundFloor）；
-@@ -1569,13 +1596,28 @@
+@@ -1632,13 +1660,28 @@
              parts[#parts + 1] = ft .. "x" .. n
          end
      end
@@ -103,7 +103,7 @@
      end
      print(LOG .. "RELINK overlay e=" .. name .. " at=" .. at(sq) .. " refund=" .. table.concat(parts, ","))
      return true
-@@ -1727,6 +1769,7 @@
+@@ -1794,6 +1837,7 @@
  -- 依序放好 cells 的每一格（{ sq, spr, cost, yoff, role }）。物件一建好就記進 placed（之後出錯時拆回用；還沒加進格子的
  -- 拆回時會略過）。丟錯由呼叫端 pcall 接。
  function Place.build(kind, cells, placed)
@@ -111,7 +111,7 @@
      local first = #placed + 1
      if kind == "stairs" then
          placeStairs(cells, placed)
-@@ -1955,7 +1998,6 @@
+@@ -2078,7 +2122,6 @@
      if Floors and sq and sq:getZ() <= 0 and obj:isFloor() then Floors.forget(obj) end
      if obj:hasModData() and obj:getModData().builderEntry then wipe(obj:getBuildMaterials()) end
  end
@@ -119,7 +119,7 @@
  
  -- 原版撿起再放下是建新物件：容量、殭屍打不壞回到原版值，照目前沙盒值補回（同讀檔的 migrate；兩個都冪等，本 MOD 自己蓋的、
  -- 多人客戶端收到的再走一次不變）。記號：實心家具由原版寫回頂層（ISMoveableSpriteProps.lua:1335-1349）；不擋路的（牆櫃、
-@@ -1995,43 +2037,96 @@
+@@ -2118,43 +2161,96 @@
      end
      if send and isServer() then obj:transmitModData() end -- 物件封包已經送出（上面），序號與名字另外送
  end
@@ -251,7 +251,7 @@
  end
  
  -- 改之前可不可打：isThumpable() 在同一條邊有木板時一律回 true（IsoThumpable.java:1693-1695；isBarricaded 只比方向，
-@@ -2046,9 +2141,10 @@
+@@ -2169,9 +2265,10 @@
  
  -- 讀檔時照目前的沙盒值重設「殭屍打不壞」「殭屍敲不破門」（建造時已照當下的值設好）。只改和設定不一致的：兩個選項都關、
  -- 沒改過的物件什麼都不動
@@ -264,7 +264,7 @@
          if on == (obj:getThumpDmg() >= PROOF_DMG - 3) then return end
          if on then
              obj:setThumpDmg(proofDmg(wasThumpable(obj), obj:getThumpDmg()))
-@@ -2058,16 +2154,21 @@
+@@ -2181,16 +2278,21 @@
              obj:setIsThumpable(k % 2 == 1)
              obj:setThumpDmg(k >= 2 and 1 or 8) -- 8＝IsoThumpable 的預設（IsoThumpable.java:106）
          end
@@ -292,7 +292,7 @@
          end
      end
  end
-@@ -2076,14 +2177,14 @@
+@@ -2199,14 +2301,14 @@
  -- 100（ItemContainer.java:170），伺服器搬東西照它檢查（TransactionManager.java:247-253,272-278），設更大也放不進去。原本的容量
  -- 照引擎建容器的算法（IsoObject.java:5272-5291；沒寫時一般 50、冷凍庫 15，ItemContainer.java:93）；認不出來的不動，本來就 ≥100 的
  -- 算出來也是 100，和 getCapacity 一樣，不動。容量隨存檔（ItemContainer.java:2487,2506）。建造時在送給玩家之前設，讀檔時兩端照目前的值重設
@@ -309,7 +309,7 @@
      for i = 0, n - 1 do
          local c = obj:getContainerByIndex(i)
          local base
-@@ -2099,31 +2200,33 @@
+@@ -2222,31 +2324,33 @@
      end
  end
  
@@ -362,7 +362,7 @@
          if sq:has(T.stairsTW) then
              Place.recheck(x - 1, y, z + 1)
          elseif sq:has(T.stairsTN) then
-@@ -2131,41 +2234,254 @@
+@@ -2254,41 +2358,254 @@
          end
      end
      if not instanceof(obj, "IsoThumpable") then

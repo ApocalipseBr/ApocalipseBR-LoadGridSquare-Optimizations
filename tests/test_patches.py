@@ -1,12 +1,16 @@
 import json
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from lupa.lua51 import LuaRuntime
 
 from scripts.lua_diff import apply_diff, unified_diff
 from scripts.true_swimming import PATCH_DIR, patch_source
-from tests.compatibility import BASELINES, GENERATED, GENERATED_TESTS, ROOT, lua_files, mod_info, version_layer
+from tests.compatibility import (
+    BASELINES, GENERATED, GENERATED_TESTS, ROOT, generate_companion, lua_files, mod_info, version_layer,
+)
 from tests.lua_runner import LUA_TESTS, run_lua_spec
 
 
@@ -82,6 +86,30 @@ class PatchTests(unittest.TestCase):
             with self.subTest(source=source):
                 with self.assertRaisesRegex(ValueError, "expected exactly one"):
                     patch_source(source)
+
+    def test_workshop_generation_rejects_broken_context_and_syntax(self):
+        companion = "minidoracatbuilderfix"
+        path = next(iter(GENERATED[companion]["overrides"]))
+        original = b"local legacy = true\nreturn legacy\n"
+        with TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            source = scratch / path
+            source.parent.mkdir(parents=True)
+            diff = scratch / "patches/minidoracat-builder/Place.patch"
+            diff.parent.mkdir(parents=True)
+            diff.write_bytes(unified_diff(original, b"local legacy =\nreturn legacy\n", b"Place.lua"))
+            inputs = ("Builder test source", {path.lower(): source}, {})
+            with patch("tests.compatibility.ROOT", scratch), patch(
+                "tests.compatibility.upstream_files", return_value=inputs,
+            ), patch("builtins.print"):
+                for contents, error in (
+                    (original.replace(b"legacy", b"current"), "expected exactly one match, found 0"),
+                    (original, "generated Lua failed to compile"),
+                ):
+                    with self.subTest(error=error):
+                        source.write_bytes(contents)
+                        with self.assertRaisesRegex(ValueError, error):
+                            generate_companion(scratch, companion, reviewed=False)
 
 
 if __name__ == "__main__":

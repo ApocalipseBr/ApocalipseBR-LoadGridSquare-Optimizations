@@ -1,0 +1,20 @@
+--- a/media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua
++++ b/media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua
+@@ -23,13 +23,15 @@
+ local KEY = aparosa_BD_Rooms.MODDATA_KEY
+ 
+ -- サーバーで記録が変わった後に呼ぶ。全員へ送る
+-function aparosa_BD_Sync.publish()
++-- Pass the surviving host record when it is the only record changed in place.
++-- Clients still receive the complete snapshot so merged records disappear.
++function aparosa_BD_Sync.publish(changedRecord)
+     if isServer() then
+         ModData.transmit(KEY)
+     end
+     -- 記録の写しを地下室のマスへも置く（落ちた時に記録だけが消えるのを戻すため。aparosa_BD_Mirror、todo B33）
+     if aparosa_BD_Mirror then
+-        aparosa_BD_Mirror.sync()
++        aparosa_BD_Mirror.sync(changedRecord)
+     end
+ end
+ 
