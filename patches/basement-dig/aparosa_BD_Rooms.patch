@@ -1,0 +1,51 @@
+--- a/media/lua/shared/aparosa_BasementDig/aparosa_BD_Rooms.lua
++++ b/media/lua/shared/aparosa_BasementDig/aparosa_BD_Rooms.lua
+@@ -43,7 +43,7 @@
+ -- 同じ部屋が残って毎回の更新で同じ誤りが出続ける（専用サーバー、1.6.2 で読込の時に部屋を数え直すようになって起きた）。
+ -- 先に ProcessSpottedRooms を呼べば、待っている部屋は def のあるうちに原版どおり処理されて空になる。
+ -- 既に def の無い部屋が積まれていると Java の誤りが Lua へ来るので pcall で包み、登録は続ける
+-function aparosa_BD_Rooms.applyEditor(editor)
++function aparosa_BD_Rooms.applyEditor(editor, anchor, z)
+     local cell = getCell()
+     if cell and cell.ProcessSpottedRooms then
+         pcall(function() cell:ProcessSpottedRooms() end)
+@@ -52,7 +52,10 @@
+     -- applyChanges は IsoRoom の格子の表を埋めないので、当てる前に本 mod の部屋のマスを集め、当てた後に足す
+     -- （aparosa_BD_RoomSquares。Viewpoint の壁の裏面、docs/viewpoint-compat-zh-tw.md 6 節）
+     local tiles = aparosa_BD_RoomSquares.collect(editor, aparosa_BD_Rooms.isOwnRoomName)
+-    editor:applyChanges(false)
++    if not (anchor and isServer() and ApocBRRoomEdits and ApocBRRoomEdits.tryApply
++            and ApocBRRoomEdits.tryApply(editor, anchor.x, anchor.y, z)) then
++        editor:applyChanges(false)
++    end
+     aparosa_BD_Rooms.noRefill(points)
+     aparosa_BD_RoomSquares.fill(tiles, aparosa_BD_Rooms.isOwnRoomName)
+ end
+@@ -160,7 +163,7 @@
+ -- metaID は並びの最初の長方形の北西の角から決まり、後の長方形は「より北で、かつ東でない」時だけ置き換える
+ -- （BuildingDef.calculateMetaID）。そのため元の 4x2 を必ず最初に置く。北西へ広げた時だけ metaID が変わり、
+ -- 古い建物は次の読み込みまで残る（読み込み時は ModData から 1 つにまとめて登録し直すので消える）
+-function aparosa_BD_Rooms.registerRects(rects, z, replacing, name)
++function aparosa_BD_Rooms.registerRects(rects, z, replacing, name, growthAnchor)
+     -- ゲームの更新で内蔵機能が無くなった時に、読みにくいエラーではなく記録を残す（aparosa_BD_Compat も参照）
+     if not BuildingRoomsEditor or not BuildingRoomsEditor.getInstance then
+         log("BuildingRoomsEditor is missing; the game update may have changed it")
+@@ -194,7 +197,7 @@
+         log("editor invalid: " .. tostring(editor:getInvalidString()))
+         return false
+     end
+-    aparosa_BD_Rooms.applyEditor(editor)
++    aparosa_BD_Rooms.applyEditor(editor, growthAnchor, z)
+     if isServer() then
+         aparosa_BD_Rooms.refreshServerSquares(rects, z)
+     end
+@@ -584,7 +587,8 @@
+         end
+     end
+     if grewMain then
+-        local okMain, sig = aparosa_BD_Rooms.registerRects(liveRects(st), record.z, true, aparosa_BD_Rooms.nameOf(record))
++        local rects = liveRects(st)
++        local okMain, sig = aparosa_BD_Rooms.registerRects(rects, record.z, true, aparosa_BD_Rooms.nameOf(record), rects[1])
+         st.sig = sig
+         ok = okMain and ok
+     end

@@ -42,7 +42,8 @@
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Adopt.lua": "5a9270ffd2cf679ec3f252a3c402b34d86470fede200c148e0da7cc783a6b11a",
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Sync.lua": "d7d86292360909dd3f6dd8af7e225ca964ae3699e87abbbbc49ef0446922c694",
         "media/lua/shared/aparosa_BasementDig/aparosa_BD_Expand.lua": "51f1792416ea2bdc696d668a4b8da1c94199800657abf9525c1247fad1b545ea",
-        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Entity.lua": "ecb7a877a4396ce3bfa249f6511a5df6038ada77530d0286e346a67e63da985d"
+        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Entity.lua": "ecb7a877a4396ce3bfa249f6511a5df6038ada77530d0286e346a67e63da985d",
+        "media/lua/shared/aparosa_BasementDig/aparosa_BD_Rooms.lua": "083fc0dc96f0df3f90c3d1f44977b37f504632bfac2b3d0eba73234d9ba451c0"
       },
       "patch_dir": "basement-dig"
     }

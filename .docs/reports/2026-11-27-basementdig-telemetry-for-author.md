@@ -9,7 +9,7 @@ The server completed **219 simulation ticks across 963 outer-loop iterations**. 
 | Field | Value |
 | --- | --- |
 | Server | ApocalipseBR dedicated server, Project Zomboid Build `42.22` |
-| Basement Building | `1.6.13`, the latest Workshop release at the time and the same version used for the local source review |
+| Basement Building | `1.6.13`, the Workshop release used for the source review |
 | Snapshot emitted and received | 2026-11-27 13:10:40, Fortaleza time (UTC−03:00) |
 | Actual reporting window | 30,027 ms |
 | Slowest tick timestamp | 2026-11-27 13:10:21, same time zone |
@@ -91,4 +91,14 @@ The earlier companion addressed ladder and record recovery during map streaming.
 - **Limit recovery-copy work to the affected basement.** The successful adoption passes the surviving record through `Sync.publish` to Mirror. Mirror checks and writes copies for that record. The full authoritative snapshot still goes to clients so they can remove records that disappeared in a merge. Other publication paths keep their existing behavior.
 - **Measure application and publication separately.** Successful adopts that spend at least 100 ms across these two steps emit `slow adopt` with `applyMs` and `publishMs`. Application includes room registration and world updates. Publication still includes the full snapshot broadcast and the mirror write. This split helps locate the remaining cost.
 
-The refreshed companion was built against Basement Building **1.6.13** and passed mocked tests in the game's Kahlua runtime, including a merge and a rejected distant request. 
+The companion targets Basement Building **1.6.13**. The adoption fixtures cover a merge and a rejected distant request. Check [Workshop compatibility](https://github.com/ApocalipseBr/ApocalipseBR-LoadGridSquare-Optimizations/actions/workflows/workshop-compatibility.yml) for the Workshop sources and companion package tested by CI.
+
+## Follow-up after the Lua refactor
+
+We wired adoption and ordinary expansion into the [ApocalipseBR Best Practices Library](https://github.com/rbm4/apocalipsebr_bplib/blob/master/README.md). Adoption can resume its neighborhood refresh across ticks and coalesce publication. Expansion can pause during preparation before editing the world. A later queued adoption still recorded **228 ms of room registration in one server frame** and **1 ms of publication work**. The registration timer includes Java and the mod's server-square refresh. [Dedicated-server registration trace](2026-11-27-basementdig-room-registration-stutter.md)
+
+The original Build 42.22.2 editor validates room and building IDs across the map three times and then rebuilds the global ID maps. The vanilla Lua API has no supported in-place resize that provides equivalent registration for an isolated edit. Lua can batch compatible additions, and BPJobs can choose when to start the commit. Shortening the commit itself required changing the Java path. [Original-JAR validation](https://github.com/rbm4/apocalipsebr-zomboid-patches/blob/master/.docs/reports/2026-11-27-room-registration-validation.md)
+
+The [Java agent implementation](https://github.com/rbm4/apocalipsebr-zomboid-patches/blob/master/.docs/features/room-id-validation.md#scoped-lua-commits) keeps the editor's replacement and spatial updates and limits ID repair to the relevant owner cells for explicit Lua requests. Ordinary editor calls retain their global passes. The companion requests the agent path for an existing main basement and retains the vanilla fallback.
+
+Look for `room-registration-ab` in [Project Zomboid server integration](https://github.com/rbm4/apocalipsebr-zomboid-patches/actions/workflows/server-integration.yml). Its summary compares **Vanilla**, **Indexed lookup**, and **Indexed + scoped** on the same dedicated-server runner. The [comparison guide](https://github.com/rbm4/apocalipsebr-zomboid-patches/blob/master/.docs/reports/2026-11-27-scoped-room-commit-validation.md) identifies the artifacts and explains how to read the results. The fixture isolates the editor call. A production capture with BasementDig installed is still needed.
